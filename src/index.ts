@@ -264,7 +264,7 @@ async function handleCities(env: Env): Promise<Response> {
 // statistically weak rankings (1 rearrest out of 3 cases ≠ 33% danger).
 async function handleWorst(url: URL, env: Env): Promise<Response> {
 	const n = Math.min(Number(url.searchParams.get("n") || 50), 200);
-	const minCases = Number(url.searchParams.get("min_cases") || 20);
+	const minCases = Number(url.searchParams.get("min_cases") || 10);
 
 	type Ranked = {
 		rank: number;
