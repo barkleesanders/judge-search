@@ -939,34 +939,48 @@ async function clLookupBio(
 	if (parts.length < 2) return;
 	const last = parts[parts.length - 1];
 	const first = parts[0];
-	try {
-		const q = new URLSearchParams({
-			format: "json",
-			name_last: last,
-			positions__court__full_name__icontains: state,
-			positions__position_type: "jud",
-			page_size: "5",
-		});
+	const search = async (
+		params: Record<string, string>,
+	): Promise<Record<string, unknown> | null> => {
+		const q = new URLSearchParams(params);
 		const res = await fetch(`${CL}/people/?${q.toString()}`, {
 			headers: {
 				Authorization: `Token ${token}`,
 				"User-Agent": "JudgeSearch/2",
 			},
 		});
-		if (!res.ok) return;
+		if (!res.ok) return null;
 		const data = (await res.json()) as {
 			results?: Array<Record<string, unknown>>;
 		};
-		// Match by first name to handle same-surname disambiguation
-		const match = (data.results || []).find(
-			(p) =>
-				String(p.name_first || "")
-					.toLowerCase()
-					.startsWith(first.toLowerCase()) ||
-				String(p.name_first || "")
-					.toLowerCase()
-					.includes(first.toLowerCase()),
+		// Require first-name match to avoid picking wrong person with same surname
+		const firstLc = first.toLowerCase();
+		return (
+			(data.results || []).find((p) => {
+				const cf = String(p.name_first || "").toLowerCase();
+				return cf === firstLc || cf.startsWith(firstLc);
+			}) || null
 		);
+	};
+	try {
+		// 1. Preferred: within the judge's state court system
+		let match = await search({
+			format: "json",
+			name_last: last,
+			positions__court__full_name__icontains: state,
+			positions__position_type: "jud",
+			page_size: "5",
+		});
+		// 2. Fallback: any judge position with matching first+last name
+		//    (many county/municipal judges aren't tagged under state court)
+		if (!match) {
+			match = await search({
+				format: "json",
+				name_last: last,
+				positions__position_type: "jud",
+				page_size: "5",
+			});
+		}
 		if (!match) return;
 		if (!judge.courtlistener_id && match.id) {
 			judge.courtlistener_id = Number(match.id);
