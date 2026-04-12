@@ -1256,22 +1256,28 @@ const HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JudgeSearch — Know Your Judges. Hold Them Accountable.</title>
-<meta name="description" content="Search real court records across 8 U.S. cities. 880,000+ cases analyzed. See which judges had the most failures to appear, rearrests, and revocations.">
-<link rel="icon" type="image/png" href="/favicon.png">
+<meta name="description" content="Search real court records across 8 U.S. cities. 880,000+ cases. See how often defendants released by each judge missed court, got rearrested, or had their release revoked. All public data.">
+<meta name="theme-color" content="#c8a84b">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
 <!-- Open Graph -->
+<meta property="og:site_name" content="JudgeSearch">
 <meta property="og:title" content="JudgeSearch — Know Your Judges. Hold Them Accountable.">
-<meta property="og:description" content="Search real court records across 8 U.S. cities. 880,000+ cases. See which judges had the most failures to appear, rearrests, and revocations. All data from public records.">
+<meta property="og:description" content="Search real court records across 8 U.S. cities. 880,000+ cases. See how often defendants released by each judge missed court, got rearrested, or had their release revoked. All public data, explained in plain English.">
 <meta property="og:image" content="https://judge-search.barkleesanders.workers.dev/og-image.png">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="JudgeSearch — scales of justice on a dark background. Search real court records across 8 U.S. cities, 225+ judges, 881K cases. Sorted by impact.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://judge-search.barkleesanders.workers.dev">
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="JudgeSearch — Judicial Accountability">
-<meta name="twitter:description" content="Search 880,000+ court records across 8 U.S. cities. Real case outcomes. Real judges. Sorted by impact.">
+<meta name="twitter:description" content="Search 880,000+ court records across 8 U.S. cities. See which judges had the most missed court dates, rearrests, and release revocations. Public data, plain English.">
 <meta name="twitter:image" content="https://judge-search.barkleesanders.workers.dev/og-image.png">
+<meta name="twitter:image:alt" content="JudgeSearch — scales of justice on dark background, showing 8 cities, 225+ judges, 881K cases covered.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,800;1,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
