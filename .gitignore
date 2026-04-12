@@ -1,0 +1,21 @@
+.wrangler/
+node_modules/
+dist/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.secret
+
+# Beads / Dolt files (added by bd init)
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+
+# Scraper local artifacts
+scrapers/.tmp-*.json
+
+# Claude Code local state
+.claude/

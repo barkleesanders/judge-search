@@ -1,0 +1,10 @@
+name = "judge-search"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[[r2_buckets]]
+binding = "DATA"
+bucket_name = "judge-data"
+
+[triggers]
+crons = ["0 6 * * *"]
