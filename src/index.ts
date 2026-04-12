@@ -494,14 +494,26 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 		return merged;
 	}
 
-	// Sort: worst outcomes first — only count genuinely bad metrics (fta + rearrest)
+	// Sort: rate-based danger score, respecting each metric's _bad semantics.
+	// A judge with 100 cases at 80% rearrest ranks above one with 1000 at 10%.
+	// Volume weight (log10) prevents tiny-sample outliers from topping the list.
+	const ftaBad = metric_labels?.fta_bad ?? true;
+	const reaBad = metric_labels?.rearrest_bad ?? true;
 	const revBad = metric_labels?.revocation_bad ?? true;
+	const dangerScore = (j: JudgeRecord): number => {
+		if (j.total_cases === 0) return 0;
+		const ftaRate = j.fta_count / j.total_cases;
+		const reaRate = j.rearrest_count / j.total_cases;
+		const revRate = j.revocation_count / j.total_cases;
+		const rateScore =
+			(ftaBad ? ftaRate : -ftaRate) * 2 +
+			(reaBad ? reaRate : -reaRate) * 2 +
+			(revBad ? revRate : -revRate) * 1;
+		return rateScore * Math.log10(j.total_cases + 1) * 100;
+	};
 	judges.sort((a, b) => {
-		const aScore =
-			a.fta_count + a.rearrest_count + (revBad ? a.revocation_count : 0);
-		const bScore =
-			b.fta_count + b.rearrest_count + (revBad ? b.revocation_count : 0);
-		if (bScore !== aScore) return bScore - aScore;
+		const d = dangerScore(b) - dangerScore(a);
+		if (d !== 0) return d;
 		return b.total_cases - a.total_cases;
 	});
 
@@ -1348,7 +1360,7 @@ nav{position:sticky;top:0;z-index:50;background:rgba(10,10,10,.95);backdrop-filt
 
 /* BASEBALL CARDS */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px;margin-bottom:32px}
-.bcard{background:var(--s);border:1px solid var(--b);border-radius:var(--r);overflow:hidden;transition:border-color .2s}
+.bcard{position:relative;background:var(--s);border:1px solid var(--b);border-radius:var(--r);overflow:hidden;transition:border-color .2s}
 .bcard:hover{border-color:var(--gold)}
 .bcard-head{padding:16px 20px;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:14px}
 .bcard-av{width:48px;height:48px;border-radius:50%;background:var(--s2);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:1.1rem;font-weight:700;color:var(--gold);border:2px solid var(--b);flex-shrink:0}
@@ -1760,7 +1772,8 @@ function render(d){
   const restJudges=d.judges.slice(12);
 
   const area=$('results');
-  let h='<h2 style="font-family:var(--serif);font-size:1.3rem;margin-bottom:16px">'+d.judges.length+' Judges &mdash; '+esc(d.city)+', '+esc(d.state)+'</h2>';
+  let h='<h2 style="font-family:var(--serif);font-size:1.3rem;margin-bottom:6px">'+d.judges.length+' Judges &mdash; '+esc(d.city)+', '+esc(d.state)+'</h2>';
+  h+='<p style="color:var(--t3);font-size:.8rem;margin-bottom:16px">Ranked by <strong style="color:var(--t2)">Danger Score</strong> — rate-weighted combination of '+esc(lbl.fta_bar)+', '+esc(lbl.rearrest_bar)+', and '+esc(lbl.revocation_bar)+' outcomes, weighted by case volume. <span style="color:var(--red)">Red</span> = top quarter, <span style="color:var(--orange)">orange</span> = top half, <span style="color:var(--green)">green</span> = bottom half.</p>';
 
   // City-wide context note (LA/Seattle/NY — where we have real arrest totals but
   // not per-judge data).
@@ -1784,9 +1797,15 @@ function render(d){
   }
   h+='<div class="cards">';
 
-  for(const j of topJudges){
+  // Judges are already sorted by rate-based danger score on the server,
+  // so array index = rank-1 within the city (most concerning first).
+  const totalRanked=d.judges.filter(j=>j.total_cases>0).length;
+
+  for(let idx=0;idx<topJudges.length;idx++){
+    const j=topJudges[idx];
     const initials=(j.name||'').split(' ').map(w=>(w[0]||'')).join('').slice(0,2);
     const has=j.total_cases>0;
+    const rank=has?idx+1:null;
 
     // Per-judge rates
     const rearrRate=has?j.rearrest_count/j.total_cases:0;
@@ -1803,9 +1822,16 @@ function render(d){
     const ftaAbove=ftaVs>15;
     const revocAbove=lbl.revocation_bad?revocVs>15:revocVs<-15;
 
+    // Rank color: top 25% red, top 50% orange, bottom half green
+    const rankColor=rank&&totalRanked?(rank<=Math.ceil(totalRanked*0.25)?'var(--red)':rank<=Math.ceil(totalRanked*0.5)?'var(--orange)':'var(--green)'):'var(--t3)';
+
     h+='<div class="bcard">';
+    // Rank ribbon
+    if(rank){
+      h+='<div style="position:absolute;top:0;left:0;background:'+rankColor+';color:#0a0a0a;font-family:var(--serif);font-weight:800;font-size:.85rem;padding:4px 10px 4px 8px;border-radius:var(--r) 0 8px 0;letter-spacing:.02em">#'+rank+' of '+totalRanked+'</div>';
+    }
     // Header
-    h+='<div class="bcard-head"><div class="bcard-av">'+esc(initials)+'</div><div style="flex:1;min-width:0">';
+    h+='<div class="bcard-head" style="padding-top:28px"><div class="bcard-av">'+esc(initials)+'</div><div style="flex:1;min-width:0">';
     h+='<div class="bcard-name">'+esc(j.name)+'</div>';
     h+='<div class="bcard-court">'+esc(j.court)+'</div>';
     h+='<div class="bcard-loc">'+esc(j.city)+', '+esc(j.state)+'</div>';
