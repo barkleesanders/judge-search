@@ -310,6 +310,15 @@ async function handleWorst(url: URL, env: Env): Promise<Response> {
 		}
 		for (const j of d.judges) {
 			if (j.total_cases < minCases) continue;
+			// Skip judges with no actual outcome data — they'd rank with score=0
+			// and clutter the list. A judge must have at least one recorded
+			// rearrest/fta/revocation to be rankable.
+			if (
+				j.rearrest_count === 0 &&
+				j.fta_count === 0 &&
+				j.revocation_count === 0
+			)
+				continue;
 			const rearrestRate = j.rearrest_count / j.total_cases;
 			const ftaRate = j.fta_count / j.total_cases;
 			const revocRate =
