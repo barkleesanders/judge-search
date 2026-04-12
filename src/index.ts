@@ -90,6 +90,7 @@ export default {
 		if (p === "/api/judge") return handleJudge(url, env);
 		if (p === "/api/seed") return handleSeed(url, env);
 		if (p === "/api/cities") return handleCities(env);
+		if (p === "/api/worst") return handleWorst(url, env);
 		if (p === "/api/upload" && request.method === "POST")
 			return handleUpload(request, url, env);
 
@@ -253,6 +254,109 @@ async function handleCities(env: Env): Promise<Response> {
 		}
 	}
 	return json(cities);
+}
+
+// ── API: Worst judges in America ──
+// Aggregates judges across all cities where the data actually measures
+// rearrests-while-on-pretrial-release (not convictions or transfers).
+// Ranks by a composite danger score: rearrest rate + missed-court rate,
+// weighted by case volume. Excludes judges with <20 cases to avoid
+// statistically weak rankings (1 rearrest out of 3 cases ≠ 33% danger).
+async function handleWorst(url: URL, env: Env): Promise<Response> {
+	const n = Math.min(Number(url.searchParams.get("n") || 50), 200);
+	const minCases = Number(url.searchParams.get("min_cases") || 20);
+
+	type Ranked = {
+		rank: number;
+		name: string;
+		city: string;
+		state: string;
+		court: string;
+		total_cases: number;
+		rearrest_count: number;
+		fta_count: number;
+		revocation_count: number;
+		rearrest_rate: number;
+		fta_rate: number;
+		revocation_rate: number;
+		danger_score: number;
+		courtlistener_id?: number;
+	};
+
+	const ranked: Ranked[] = [];
+	const excluded_cities: Array<{ slug: string; reason: string }> = [];
+	let cities_checked = 0;
+
+	for (const slug of Object.keys(CITIES)) {
+		const obj = await env.DATA.get(`courts/${slug}.json`);
+		if (!obj) continue;
+		cities_checked++;
+		const d = JSON.parse(await obj.text()) as CityData;
+		const ml = d.metric_labels;
+		// Only count cities where "rearrest" label actually measures rearrests
+		// (not "Convicted" / "Transferred Out" / "Guilty/Deferred" / etc.)
+		const measuresRearrest =
+			!!ml &&
+			(/rearrest/i.test(ml.rearrest || "") ||
+				/rearrest/i.test(ml.rearrest_bar || ""));
+		if (!measuresRearrest) {
+			excluded_cities.push({
+				slug,
+				reason: ml
+					? `"${ml.rearrest}" is not a rearrest metric`
+					: "no metric labels",
+			});
+			continue;
+		}
+		for (const j of d.judges) {
+			if (j.total_cases < minCases) continue;
+			const rearrestRate = j.rearrest_count / j.total_cases;
+			const ftaRate = j.fta_count / j.total_cases;
+			const revocRate =
+				ml.revocation_bad !== false ? j.revocation_count / j.total_cases : 0;
+			// Danger score: weighted combination — rearrest is worst (new crime),
+			// FTA next (court avoidance), revocation last (system caught it).
+			// Multiplied by log(cases+1) so high-volume judges can't hide behind
+			// small case counts but extreme rates on tiny samples don't dominate.
+			const rawRate = rearrestRate * 2 + ftaRate * 1 + revocRate * 0.5;
+			const volumeWeight = Math.log10(j.total_cases + 1);
+			const danger_score = Number((rawRate * volumeWeight * 100).toFixed(2));
+			ranked.push({
+				rank: 0,
+				name: j.name,
+				city: j.city,
+				state: j.state,
+				court: j.court,
+				total_cases: j.total_cases,
+				rearrest_count: j.rearrest_count,
+				fta_count: j.fta_count,
+				revocation_count: j.revocation_count,
+				rearrest_rate: Number(rearrestRate.toFixed(4)),
+				fta_rate: Number(ftaRate.toFixed(4)),
+				revocation_rate: Number(revocRate.toFixed(4)),
+				danger_score,
+				courtlistener_id: j.courtlistener_id,
+			});
+		}
+	}
+
+	ranked.sort((a, b) => b.danger_score - a.danger_score);
+	const top = ranked.slice(0, n).map((r, i) => ({ ...r, rank: i + 1 }));
+
+	return json({
+		generated_at: new Date().toISOString(),
+		cities_checked,
+		cities_with_rearrest_data: cities_checked - excluded_cities.length,
+		excluded_cities,
+		min_cases: minCases,
+		total_qualified_judges: ranked.length,
+		returned: top.length,
+		judges: top,
+		methodology:
+			"Danger score = (rearrest_rate × 2 + fta_rate × 1 + revocation_rate × 0.5) × log10(cases+1) × 100. Only includes judges in cities whose data actually measures rearrests-while-on-pretrial-release, and only judges with ≥" +
+			minCases +
+			" cases. Missing from rankings: cities that report convictions/transfers (not rearrests) and cities without per-judge case data.",
+	});
 }
 
 // ── API: Seed a city (manual trigger) ──
@@ -1305,6 +1409,9 @@ footer a{color:var(--gold)}
   .rate-vs{display:none}
   .bcard-rates{padding:10px 14px 14px}
   .jtable th:nth-child(2),.jtable td:nth-child(2){display:none}
+  .wtable .w-fta,.wtable .w-cases{display:none}
+  .wtable{font-size:.75rem}
+  .wtable th,.wtable td{padding:8px 4px!important}
   .how-grid{grid-template-columns:1fr!important}
   section#method{padding:36px 16px}
   footer{padding:28px 16px;font-size:.75rem}
@@ -1312,7 +1419,7 @@ footer a{color:var(--gold)}
 </style>
 </head>
 <body>
-<nav><div class="ni"><div class="logo">Judge<span>Search</span>.us</div><div class="nl"><a href="#map-box">Map</a><a href="#method">About</a><a href="#sources">Data Sources</a><a href="https://free.law/about/" target="_blank">Free Law Project</a></div></div></nav>
+<nav><div class="ni"><div class="logo">Judge<span>Search</span>.us</div><div class="nl"><a href="#map-box">Map</a><a href="#worst50" style="color:var(--red)">Worst 50</a><a href="#method">About</a><a href="#sources">Data Sources</a><a href="https://free.law/about/" target="_blank">Free Law Project</a></div></div></nav>
 
 <section class="hero">
 <h1>Know your judges.<br><em>Hold them accountable.</em></h1>
@@ -1336,6 +1443,24 @@ footer a{color:var(--gold)}
 <div class="wrap" id="results">
 <div class="empty"><h3>Select a city to view judges</h3><p>Click a city on the map or choose from the buttons above.</p></div>
 </div>
+
+<section style="padding:50px 24px;border-top:1px solid var(--b);background:linear-gradient(180deg,#0a0a0a,#140a0a)" id="worst50">
+<div style="max-width:1000px;margin:0 auto">
+<div style="text-align:center;margin-bottom:8px"><span style="font-family:var(--mono);font-size:.72rem;color:var(--red);letter-spacing:.12em;padding:4px 12px;background:rgba(232,64,64,.08);border:1px solid rgba(232,64,64,.3);border-radius:20px">NATIONAL ACCOUNTABILITY INDEX</span></div>
+<h2 style="font-family:var(--serif);font-size:1.8rem;text-align:center;margin:12px 0 8px 0">The 50 Worst Judges in America</h2>
+<p style="text-align:center;color:var(--t2);font-size:.95rem;margin-bottom:24px;max-width:720px;margin-left:auto;margin-right:auto">Ranked by <strong style="color:var(--t)">Danger Score</strong> — a composite of rearrest rate, missed-court rate, and release-revocation rate, weighted by case volume. Only includes judges in cities whose public records actually measure rearrests while defendants are out on pretrial release.</p>
+
+<div id="worst50-list">
+<div class="empty" style="padding:30px 20px"><div class="spin" style="margin:0 auto 12px"></div><p>Loading national rankings...</p></div>
+</div>
+
+<div id="worst50-meta" style="margin-top:18px;font-family:var(--mono);font-size:.72rem;color:var(--t3);text-align:center;line-height:1.6"></div>
+
+<div style="margin-top:24px;padding:16px 20px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r);color:var(--t2);font-size:.82rem;line-height:1.6">
+<strong style="color:var(--gold)">How to read this list.</strong> A high danger score means the judge has released defendants who often went on to be arrested again or skip court while their original case was still open. The list will grow as more cities publish per-judge rearrest data. Jurisdictions that only publish convictions or transfers (not rearrests) are excluded from the ranking because their data can't be compared apples-to-apples. See the <a href="#sources" style="color:var(--gold)">Data Sources</a> section for which cities currently qualify.
+</div>
+</div>
+</section>
 
 <section style="padding:50px 24px;border-top:1px solid var(--b);background:var(--s)" id="method">
 <div style="max-width:900px;margin:0 auto">
@@ -1503,6 +1628,53 @@ async function fetchCity(slug){
     area.innerHTML='<div class="empty"><h3>Error</h3><p>'+esc(e.message)+'</p></div>';
   }
 }
+
+// National Accountability Index — 50 worst judges in America
+async function fetchWorst50(){
+  const area=$('worst50-list');
+  const meta=$('worst50-meta');
+  try{
+    const res=await fetch('/api/worst?n=50');
+    if(!res.ok)throw new Error('Rankings unavailable');
+    const d=await res.json();
+    if(!d.judges||d.judges.length===0){
+      area.innerHTML='<div class="empty" style="padding:30px 20px"><h3 style="color:var(--orange)">Not enough data yet</h3><p>Ranking requires cities with per-judge rearrest data. '+d.cities_with_rearrest_data+' of '+d.cities_checked+' cities currently qualify.</p></div>';
+      return;
+    }
+    let h='<div style="overflow-x:auto"><table class="wtable" style="width:100%;border-collapse:collapse;font-family:var(--sans);font-size:.85rem">';
+    h+='<thead><tr style="border-bottom:2px solid var(--b2);text-align:left">';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;width:40px">#</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em">JUDGE</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em" class="w-city">CITY</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-cases">CASES</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right">REARREST</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-fta">MISSED</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right">DANGER</th>';
+    h+='</tr></thead><tbody>';
+    for(const j of d.judges){
+      const rearrPct=(j.rearrest_rate*100).toFixed(1);
+      const ftaPct=(j.fta_rate*100).toFixed(1);
+      const rankColor=j.rank<=10?'var(--red)':j.rank<=25?'var(--orange)':'var(--gold)';
+      h+='<tr style="border-bottom:1px solid var(--b)">';
+      h+='<td style="padding:10px 8px;font-family:var(--serif);font-weight:800;font-size:1rem;color:'+rankColor+'">'+j.rank+'</td>';
+      h+='<td style="padding:10px 8px"><div style="font-weight:600;color:var(--t)">'+esc(j.name)+'</div><div style="color:var(--t3);font-size:.72rem">'+esc(j.court)+'</div></td>';
+      h+='<td style="padding:10px 8px;color:var(--t2)" class="w-city">'+esc(j.city)+', '+esc(j.state)+'</td>';
+      h+='<td style="padding:10px 8px;text-align:right;color:var(--t2);font-variant-numeric:tabular-nums" class="w-cases">'+j.total_cases.toLocaleString()+'</td>';
+      h+='<td style="padding:10px 8px;text-align:right;color:var(--red);font-weight:600;font-variant-numeric:tabular-nums">'+rearrPct+'%</td>';
+      h+='<td style="padding:10px 8px;text-align:right;color:var(--orange);font-variant-numeric:tabular-nums" class="w-fta">'+ftaPct+'%</td>';
+      h+='<td style="padding:10px 8px;text-align:right;font-family:var(--serif);font-weight:800;color:'+rankColor+';font-size:1rem">'+j.danger_score.toFixed(1)+'</td>';
+      h+='</tr>';
+    }
+    h+='</tbody></table></div>';
+    area.innerHTML=h;
+    meta.innerHTML='Showing '+d.returned+' of '+d.total_qualified_judges+' qualified judges · '+d.cities_with_rearrest_data+'/'+d.cities_checked+' cities have rearrest data · Min '+d.min_cases+' cases to qualify · Generated '+new Date(d.generated_at).toLocaleString();
+  }catch(e){
+    area.innerHTML='<div class="empty" style="padding:30px 20px"><h3 style="color:var(--red)">Error</h3><p>'+esc(e.message)+'</p></div>';
+  }
+}
+
+// Load rankings on page ready
+fetchWorst50();
 
 function render(d){
   // Per-city metric labels with fallbacks
