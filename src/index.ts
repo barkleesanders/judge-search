@@ -427,16 +427,19 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 			judges = r.judges;
 			source = r.source;
 			metric_labels = r.metric_labels;
+			await enrichBiosFromCL(judges, "Florida", env.COURTLISTENER_TOKEN);
 		} else if (slug === "chicago") {
 			const r = await scrapeChicago(cityName);
 			judges = r.judges;
 			source = r.source;
 			metric_labels = r.metric_labels;
+			await enrichBiosFromCL(judges, "Illinois", env.COURTLISTENER_TOKEN);
 		} else if (slug === "atlanta") {
 			const r = await scrapeAtlanta(cityName);
 			judges = r.judges;
 			source = r.source;
 			metric_labels = r.metric_labels;
+			await enrichBiosFromCL(judges, "Georgia", env.COURTLISTENER_TOKEN);
 		} else if (slug === "los-angeles") {
 			const r = await scrapeLosAngeles(cityName);
 			judges = r.judges;
@@ -582,6 +585,15 @@ async function handleUpload(
 		parsed.is_stale = false;
 	}
 	parsed.last_updated = parsed.last_updated || new Date().toISOString();
+	// Enrich bios from CourtListener so uploaded cities (SF, Texas) match the
+	// same bio coverage as LA/Seattle/NY.
+	if (parsed.judges?.length && parsed.state) {
+		await enrichBiosFromCL(
+			parsed.judges,
+			parsed.state,
+			env.COURTLISTENER_TOKEN,
+		);
+	}
 	await env.DATA.put(`courts/${slug}.json`, JSON.stringify(parsed), {
 		httpMetadata: { contentType: "application/json" },
 	});
@@ -907,6 +919,95 @@ async function enrichWithDocketCounts(
 				chunk[k].total_cases = count;
 			}
 		}
+	}
+}
+
+// Look up a judge's CourtListener bio (gender, education, political affiliation,
+// dates, photo, etc.) by searching their name within a state. Writes directly
+// to the judge record so every city's judges have uniform bio richness.
+async function clLookupBio(
+	judge: JudgeRecord,
+	state: string,
+	token: string | undefined,
+): Promise<void> {
+	if (!token) return;
+	// Strip common honorifics the Socrata datasets sometimes include
+	const clean = judge.name
+		.replace(/^(Judge|Justice|Honorable|Hon\.|The Honorable)\s+/i, "")
+		.trim();
+	const parts = clean.split(/\s+/).filter(Boolean);
+	if (parts.length < 2) return;
+	const last = parts[parts.length - 1];
+	const first = parts[0];
+	try {
+		const q = new URLSearchParams({
+			format: "json",
+			name_last: last,
+			positions__court__full_name__icontains: state,
+			positions__position_type: "jud",
+			page_size: "5",
+		});
+		const res = await fetch(`${CL}/people/?${q.toString()}`, {
+			headers: {
+				Authorization: `Token ${token}`,
+				"User-Agent": "JudgeSearch/2",
+			},
+		});
+		if (!res.ok) return;
+		const data = (await res.json()) as {
+			results?: Array<Record<string, unknown>>;
+		};
+		// Match by first name to handle same-surname disambiguation
+		const match = (data.results || []).find(
+			(p) =>
+				String(p.name_first || "")
+					.toLowerCase()
+					.startsWith(first.toLowerCase()) ||
+				String(p.name_first || "")
+					.toLowerCase()
+					.includes(first.toLowerCase()),
+		);
+		if (!match) return;
+		if (!judge.courtlistener_id && match.id) {
+			judge.courtlistener_id = Number(match.id);
+		}
+		if (!judge.gender && match.gender) {
+			judge.gender =
+				match.gender === "m" ? "Male" : match.gender === "f" ? "Female" : "";
+		}
+		if (!judge.born && match.date_dob) judge.born = String(match.date_dob);
+		if (!judge.birthplace && (match.dob_city || match.dob_state)) {
+			judge.birthplace =
+				`${match.dob_city || ""}${match.dob_state ? `, ${match.dob_state}` : ""}`.trim();
+		}
+		if (judge.has_photo === undefined && match.has_photo !== undefined) {
+			judge.has_photo = Boolean(match.has_photo);
+		}
+		if (
+			!judge.political_affiliation &&
+			(match.political_affiliations as unknown[])?.length
+		) {
+			judge.political_affiliation = "On Record";
+		}
+		if (!judge.education?.length && (match.educations as unknown[])?.length) {
+			judge.education = [`${(match.educations as unknown[]).length} record(s)`];
+		}
+	} catch {
+		/* bio lookup is best-effort — never block scraping on failure */
+	}
+}
+
+// Enrich every judge in a list with CourtListener bios (parallelized).
+async function enrichBiosFromCL(
+	judges: JudgeRecord[],
+	state: string,
+	token: string | undefined,
+): Promise<void> {
+	if (!token || judges.length === 0) return;
+	const chunkSize = 10;
+	for (let i = 0; i < judges.length; i += chunkSize) {
+		const chunk = judges.slice(i, i + chunkSize);
+		await Promise.all(chunk.map((j) => clLookupBio(j, state, token)));
 	}
 }
 
