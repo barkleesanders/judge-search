@@ -337,13 +337,21 @@ async function handleWorst(url: URL, env: Env): Promise<Response> {
 			const ftaRate = j.fta_count / j.total_cases;
 			const revocRate =
 				ml.revocation_bad !== false ? j.revocation_count / j.total_cases : 0;
-			// Danger score: weighted combination — rearrest is worst (new crime),
-			// FTA next (court avoidance), revocation last (system caught it).
-			// Multiplied by log(cases+1) so high-volume judges can't hide behind
-			// small case counts but extreme rates on tiny samples don't dominate.
-			const rawRate = rearrestRate * 2 + ftaRate * 1 + revocRate * 0.5;
-			const volumeWeight = Math.log10(j.total_cases + 1);
-			const danger_score = Number((rawRate * volumeWeight * 100).toFixed(2));
+			// Risk Score on a 0-100 scale — weighted percentage of concerning
+			// outcomes. Each rate contributes a capped share of the 100 points,
+			// so the number reads as "X out of 100 points of concern". Rearrest
+			// weighted heaviest (new alleged crime while out), missed-court next
+			// (shows up in bench warrants), revocation last (system corrected).
+			const rawScore =
+				rearrestRate * 100 * 0.5 + ftaRate * 100 * 0.3 + revocRate * 100 * 0.2;
+			// Volume confidence: lightly penalizes scores from tiny samples so
+			// a judge with 10 cases at 50% doesn't outrank one with 2,000 at
+			// 35%. At 100+ cases the weight reaches ~0.97 (almost full score).
+			const volumeConfidence = Math.min(
+				1,
+				Math.log10(j.total_cases + 1) / Math.log10(101),
+			);
+			const danger_score = Math.round(rawScore * volumeConfidence * 10) / 10;
 			ranked.push({
 				rank: 0,
 				name: j.name,
@@ -1810,6 +1818,9 @@ footer a{color:var(--gold)}
   .bcard-rates{padding:10px 14px 14px}
   .jtable th:nth-child(2),.jtable td:nth-child(2){display:none}
   .wtable .w-fta,.wtable .w-cases{display:none}
+  .col-legend{grid-template-columns:repeat(2,1fr)!important;gap:8px!important}
+  .col-legend > div{padding:10px!important}
+  .col-legend p{font-size:.72rem!important}
   .wtable{font-size:.75rem}
   .wtable th,.wtable td{padding:8px 4px!important}
   .how-grid{grid-template-columns:1fr!important}
@@ -1846,9 +1857,28 @@ footer a{color:var(--gold)}
 
 <section style="padding:50px 24px;border-top:1px solid var(--b);background:linear-gradient(180deg,#0a0a0a,#140a0a)" id="worst50">
 <div style="max-width:1000px;margin:0 auto">
-<div style="text-align:center;margin-bottom:8px"><span style="font-family:var(--mono);font-size:.72rem;color:var(--red);letter-spacing:.12em;padding:4px 12px;background:rgba(232,64,64,.08);border:1px solid rgba(232,64,64,.3);border-radius:20px">NATIONAL ACCOUNTABILITY INDEX</span></div>
-<h2 style="font-family:var(--serif);font-size:1.8rem;text-align:center;margin:12px 0 8px 0">The 50 Worst Judges in America</h2>
-<p style="text-align:center;color:var(--t2);font-size:.95rem;margin-bottom:24px;max-width:720px;margin-left:auto;margin-right:auto">Ranked by <strong style="color:var(--t)">Danger Score</strong> — a composite of rearrest rate, missed-court rate, and release-revocation rate, weighted by case volume. Only includes judges in cities whose public records actually measure rearrests while defendants are out on pretrial release.</p>
+<div style="text-align:center;margin-bottom:8px"><span style="font-family:var(--mono);font-size:.72rem;color:var(--red);letter-spacing:.12em;padding:4px 12px;background:rgba(232,64,64,.08);border:1px solid rgba(232,64,64,.3);border-radius:20px">NATIONAL ACCOUNTABILITY INDEX · PUBLIC RECORDS</span></div>
+<h2 style="font-family:var(--serif);font-size:1.8rem;text-align:center;margin:12px 0 8px 0">Judges Ranked by Risk Score</h2>
+<p style="text-align:center;color:var(--t2);font-size:.95rem;margin-bottom:28px;max-width:720px;margin-left:auto;margin-right:auto">Based on public court records showing how often defendants allegedly released by each judge were later <strong style="color:var(--t)">rearrested</strong>, <strong style="color:var(--t)">missed their court date</strong>, or had their <strong style="color:var(--t)">release revoked</strong> — all while their original case was still open. Everyone listed is presumed innocent under the law.</p>
+
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:24px" class="col-legend">
+<div style="padding:14px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
+<div style="font-family:var(--mono);font-size:.68rem;color:var(--gold);letter-spacing:.05em;margin-bottom:4px">TOTAL CASES</div>
+<p style="color:var(--t2);font-size:.78rem;line-height:1.4;margin:0">Number of defendants this judge made release decisions on in the dataset. More cases = more reliable signal.</p>
+</div>
+<div style="padding:14px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
+<div style="font-family:var(--mono);font-size:.68rem;color:var(--red);letter-spacing:.05em;margin-bottom:4px">REARRESTED %</div>
+<p style="color:var(--t2);font-size:.78rem;line-height:1.4;margin:0">Percent of released defendants who were <em>allegedly</em> arrested again before their first case closed. An arrest is not a conviction.</p>
+</div>
+<div style="padding:14px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
+<div style="font-family:var(--mono);font-size:.68rem;color:var(--orange);letter-spacing:.05em;margin-bottom:4px">MISSED COURT %</div>
+<p style="color:var(--t2);font-size:.78rem;line-height:1.4;margin:0">Percent of defendants who didn't appear for a scheduled hearing, causing a bench warrant to be issued.</p>
+</div>
+<div style="padding:14px;background:var(--s2);border:1px solid var(--gold);border-radius:var(--r)">
+<div style="font-family:var(--mono);font-size:.68rem;color:var(--gold);letter-spacing:.05em;margin-bottom:4px">RISK SCORE · 0–100</div>
+<p style="color:var(--t2);font-size:.78rem;line-height:1.4;margin:0"><strong style="color:var(--t)">50% × rearrest + 30% × missed + 20% × revocation</strong>, scaled to 100. Lightly adjusted by case volume so tiny samples can't top the list.</p>
+</div>
+</div>
 
 <div id="worst50-list">
 <div class="empty" style="padding:30px 20px"><div class="spin" style="margin:0 auto 12px"></div><p>Loading national rankings...</p></div>
@@ -1856,8 +1886,11 @@ footer a{color:var(--gold)}
 
 <div id="worst50-meta" style="margin-top:18px;font-family:var(--mono);font-size:.72rem;color:var(--t3);text-align:center;line-height:1.6"></div>
 
-<div style="margin-top:24px;padding:16px 20px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r);color:var(--t2);font-size:.82rem;line-height:1.6">
-<strong style="color:var(--gold)">How to read this list.</strong> A high danger score means the judge has released defendants who often went on to be arrested again or skip court while their original case was still open. The list will grow as more cities publish per-judge rearrest data. Jurisdictions that only publish convictions or transfers (not rearrests) are excluded from the ranking because their data can't be compared apples-to-apples. See the <a href="#sources" style="color:var(--gold)">Data Sources</a> section for which cities currently qualify.
+<div style="margin-top:24px;padding:18px 22px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r);color:var(--t2);font-size:.82rem;line-height:1.65">
+<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:8px">IMPORTANT · PLEASE READ</div>
+<p style="margin:0 0 8px 0">All numbers come directly from <strong style="color:var(--t)">public court records</strong> (see <a href="#sources" style="color:var(--gold)">Data Sources</a> for exact origins). A <em>rearrest</em> is an alleged arrest — not a conviction — and every defendant is presumed innocent under the law.</p>
+<p style="margin:0 0 8px 0">Judges make release decisions one case at a time, weighing factors that aren't in these numbers: prior record, charge severity, flight risk, defense counsel, prosecutor position, and local rules. A high Risk Score does <strong>not</strong> mean a judge is bad, corrupt, or incompetent — it means the defendants released in their courtroom, on the public record, had higher-than-average rates of these outcomes.</p>
+<p style="margin:0;color:var(--t3);font-size:.78rem">This site publishes open government data for civic accountability. It does not accuse anyone of a crime or imply criminal conduct by any named judge. Numbers are updated daily from official source feeds; errors in the upstream data will appear here unchanged until corrected at the source.</p>
 </div>
 </div>
 </section>
@@ -2043,13 +2076,13 @@ async function fetchWorst50(){
     }
     let h='<div style="overflow-x:auto"><table class="wtable" style="width:100%;border-collapse:collapse;font-family:var(--sans);font-size:.85rem">';
     h+='<thead><tr style="border-bottom:2px solid var(--b2);text-align:left">';
-    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;width:40px">#</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;width:40px">RANK</th>';
     h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em">JUDGE</th>';
     h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em" class="w-city">CITY</th>';
-    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-cases">CASES</th>';
-    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right">REARREST</th>';
-    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-fta">MISSED</th>';
-    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right">DANGER</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-cases" title="Total cases this judge made release decisions on in the dataset">TOTAL CASES</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" title="Percent of released defendants allegedly arrested again before first case closed">REARRESTED %</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" class="w-fta" title="Percent of defendants who missed a scheduled court appearance (bench warrant issued)">MISSED COURT %</th>';
+    h+='<th style="padding:10px 8px;color:var(--t3);font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;text-align:right" title="Composite Risk Score on a 0–100 scale. Weighted: 50% rearrest + 30% missed court + 20% revocation. Adjusted for case volume.">RISK · 0–100</th>';
     h+='</tr></thead><tbody>';
     for(const j of d.judges){
       const rearrPct=(j.rearrest_rate*100).toFixed(1);
@@ -2062,7 +2095,9 @@ async function fetchWorst50(){
       h+='<td style="padding:10px 8px;text-align:right;color:var(--t2);font-variant-numeric:tabular-nums" class="w-cases">'+j.total_cases.toLocaleString()+'</td>';
       h+='<td style="padding:10px 8px;text-align:right;color:var(--red);font-weight:600;font-variant-numeric:tabular-nums">'+rearrPct+'%</td>';
       h+='<td style="padding:10px 8px;text-align:right;color:var(--orange);font-variant-numeric:tabular-nums" class="w-fta">'+ftaPct+'%</td>';
-      h+='<td style="padding:10px 8px;text-align:right;font-family:var(--serif);font-weight:800;color:'+rankColor+';font-size:1rem">'+j.danger_score.toFixed(1)+'</td>';
+      const scoreBand=j.danger_score>=60?'Critical':j.danger_score>=40?'High':j.danger_score>=20?'Notable':'Low';
+      const scoreColor=j.danger_score>=60?'var(--red)':j.danger_score>=40?'var(--orange)':j.danger_score>=20?'var(--gold)':'var(--green)';
+      h+='<td style="padding:10px 8px;text-align:right;font-family:var(--serif);font-weight:800;color:'+scoreColor+';font-size:1.05rem" title="'+scoreBand+' concern"><span>'+j.danger_score.toFixed(1)+'</span><span style="font-size:.6rem;color:var(--t3);font-family:var(--mono);font-weight:400;margin-left:4px">/100</span></td>';
       h+='</tr>';
     }
     h+='</tbody></table></div>';
