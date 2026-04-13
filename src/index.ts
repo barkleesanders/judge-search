@@ -942,6 +942,11 @@ async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
 			revocation_bad: true,
 		},
 	};
+	// Enrich bios from CourtListener so each NY judge card has the same
+	// richness as LA/Seattle (gender, education, political affiliation,
+	// dates, photo). Best-effort — silent on failure.
+	await enrichBiosFromCL(cityData.judges, "New York", env.COURTLISTENER_TOKEN);
+
 	await env.DATA.put("courts/new-york.json", JSON.stringify(cityData), {
 		httpMetadata: { contentType: "application/json" },
 	});
@@ -1288,10 +1293,22 @@ async function clLookupBio(
 	const clean = judge.name
 		.replace(/^(Judge|Justice|Honorable|Hon\.|The Honorable)\s+/i, "")
 		.trim();
-	const parts = clean.split(/\s+/).filter(Boolean);
-	if (parts.length < 2) return;
-	const last = parts[parts.length - 1];
-	const first = parts[0];
+	// Two name formats in the wild:
+	//   "First Middle Last"     — SF, Miami, Chicago, Atlanta, Texas
+	//   "Last, First Middle"    — NY OCA CSV (official court roster style)
+	let first: string;
+	let last: string;
+	if (clean.includes(",")) {
+		const [lastPart, firstPart] = clean.split(",", 2).map((s) => s.trim());
+		last = lastPart.split(/\s+/)[0];
+		first = (firstPart.split(/\s+/)[0] || "").replace(/\.$/, "");
+	} else {
+		const parts = clean.split(/\s+/).filter(Boolean);
+		if (parts.length < 2) return;
+		last = parts[parts.length - 1];
+		first = parts[0];
+	}
+	if (!last || !first) return;
 	const search = async (
 		params: Record<string, string>,
 	): Promise<Record<string, unknown> | null> => {
@@ -2392,21 +2409,33 @@ function render(d){
     }
     h+='</div>';
 
-    // Stats row
+    // Only the CASES stat is meaningful when outcome counts are all zero
+    // (happens for LA/Seattle/NY opinion-count data — CL gives cases but
+    // not outcomes). Show a clearer message instead of four zeros.
+    const hasOutcomes=has&&(j.fta_count>0||j.rearrest_count>0||j.revocation_count>0);
     h+='<div class="bcard-stats">';
-    h+='<div class="bs"><div class="bv w">'+j.total_cases.toLocaleString()+'</div><div class="bl">Cases</div></div>';
-    h+='<div class="bs"><div class="bv r">'+j.fta_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.fta)+'</div></div>';
-    h+='<div class="bs"><div class="bv" style="color:'+col2+'">'+j.rearrest_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.rearrest)+'</div></div>';
-    h+='<div class="bs"><div class="bv" style="color:'+col3+'">'+j.revocation_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.revocation)+'</div></div>';
+    h+='<div class="bs"><div class="bv w">'+j.total_cases.toLocaleString()+'</div><div class="bl">'+(hasOutcomes?'Cases':'Opinions on Record')+'</div></div>';
+    if(hasOutcomes){
+      h+='<div class="bs"><div class="bv r">'+j.fta_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.fta)+'</div></div>';
+      h+='<div class="bs"><div class="bv" style="color:'+col2+'">'+j.rearrest_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.rearrest)+'</div></div>';
+      h+='<div class="bs"><div class="bv" style="color:'+col3+'">'+j.revocation_count.toLocaleString()+'</div><div class="bl">'+esc(lbl.revocation)+'</div></div>';
+    }else{
+      // Bio-only card: show what we DO have
+      h+='<div class="bs"><div class="bv" style="color:var(--t2)">'+(j.political_affiliation?'✓':'—')+'</div><div class="bl">Party Record</div></div>';
+      h+='<div class="bs"><div class="bv" style="color:var(--t2)">'+(j.education&&j.education.length?'✓':'—')+'</div><div class="bl">Education</div></div>';
+      h+='<div class="bs"><div class="bv" style="color:var(--t2)">'+(j.courtlistener_id?'✓':'—')+'</div><div class="bl">CL Profile</div></div>';
+    }
     h+='</div>';
 
-    // Rate bars (only if has data)
-    if(has){
+    // Rate bars (only if has real outcome data)
+    if(hasOutcomes){
       h+='<div class="bcard-rates">';
       h+=rateBar(lbl.fta_bar,ftaRate,ftaVs,ftaAbove,'var(--red)');
       h+=rateBar(lbl.rearrest_bar,rearrRate,rearrVs,rearrAbove,col2);
       h+=rateBar(lbl.revocation_bar,revocRate,revocVs,revocAbove,col3);
       h+='</div>';
+    }else if(has){
+      h+='<div class="nodata" style="padding:14px 20px;color:var(--t3);font-size:.8rem">Opinion count only — per-judge rearrest data not published by this jurisdiction. See <a href="#sources" style="color:var(--gold)">Data Sources</a>.</div>';
     }else{
       h+='<div class="nodata">Case outcome data pending</div>';
     }
