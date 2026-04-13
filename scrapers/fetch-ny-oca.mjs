@@ -130,7 +130,8 @@ function isRearrestString(v) {
 	const s = String(v).trim();
 	if (!s) return false;
 	const lc = s.toLowerCase();
-	if (lc === "no arrest" || lc === "null" || lc === "0" || lc === "n") return false;
+	if (lc === "no arrest" || lc === "null" || lc === "0" || lc === "n")
+		return false;
 	return true;
 }
 
