@@ -2773,6 +2773,21 @@ function render(d){
     }else{
       h+='<div class="nodata">Case outcome data pending</div>';
     }
+
+    // Bio footer — appointed_by, date_start, bio text, education.
+    // Only shown if we have at least one of these fields (empty for most
+    // county judges that aren't in MACJ/Wikidata/CourtListener).
+    const bioBits=[];
+    if(j.appointed_by)bioBits.push('<span style="color:var(--t2)"><span style="color:var(--t3)">Appointed by:</span> '+esc(j.appointed_by)+'</span>');
+    if(j.date_start)bioBits.push('<span style="color:var(--t2)"><span style="color:var(--t3)">On bench since:</span> '+esc(j.date_start.replace(/^(appointed|elected|joined)\\s+(?:on\\s+|in\\s+)?/i,'').trim())+'</span>');
+    if(j.political_affiliation)bioBits.push('<span style="color:var(--t2)"><span style="color:var(--t3)">Party:</span> '+esc(j.political_affiliation)+'</span>');
+    if(j.born&&/^\\d{4}/.test(j.born))bioBits.push('<span style="color:var(--t2)"><span style="color:var(--t3)">Born:</span> '+esc(j.born.slice(0,4))+'</span>');
+    if(bioBits.length>0){
+      h+='<div style="padding:12px 20px;border-top:1px solid var(--b);font-size:.78rem;line-height:1.7;display:flex;flex-wrap:wrap;gap:12px 20px">'+bioBits.join('')+'</div>';
+    }
+    if(j.bio){
+      h+='<div style="padding:10px 20px 14px;border-top:1px solid var(--b);font-size:.8rem;color:var(--t2);line-height:1.55"><span style="color:var(--t3);font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;display:block;margin-bottom:4px">OFFICIAL BIO</span>'+esc(j.bio.slice(0,400))+(j.bio.length>400?'\u2026':'')+'</div>';
+    }
     h+='</div>';
   }
   h+='</div>';
