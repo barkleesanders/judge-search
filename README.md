@@ -65,6 +65,31 @@ npx wrangler secret put COURTLISTENER_TOKEN  # for per-judge opinion enrichment 
 
 Get a free CourtListener token at https://www.courtlistener.com/register/.
 
+### Offline NY OCA pipeline (real per-judge pretrial data)
+
+NY State publishes statutorily-required per-judge pretrial release CSVs
+(Judiciary Law § 216(5)) with fields for bench warrants (missed court),
+rearrests while pending, and remands. Files are ~200-500MB per year and
+live behind a Cloudflare challenge, so download manually:
+
+```bash
+# 1. Open in browser + save (CF challenge needs JS)
+open "https://ww2.nycourts.gov/pretrial-release-data-33136"
+# Download NYS for Web 2024.csv (or latest year) to ~/Downloads/
+
+# 2. Aggregate + upload
+UPLOAD_SECRET=<your-secret> \
+  node scrapers/fetch-ny-oca.mjs \
+  "~/Downloads/NYS for Web 2024.csv" \
+  --upload
+```
+
+Flags: `--all-counties` (include non-NYC), `--upload-as SLUG` (override
+city slug). The script auto-detects column names across schema
+variations, streams the CSV (handles huge files), filters to NYC
+counties by default, and POSTs the aggregated JudgeRecord[] to
+`/api/upload`.
+
 ### Quality gates
 
 ```bash
