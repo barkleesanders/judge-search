@@ -93,6 +93,8 @@ export default {
 		if (p === "/api/worst") return handleWorst(url, env);
 		if (p === "/api/upload" && request.method === "POST")
 			return handleUpload(request, url, env);
+		if (p === "/api/upload-raw" && request.method === "POST")
+			return handleUploadRaw(request, url, env);
 		if (p === "/api/process-ny-oca") return handleProcessNyOca(url, env);
 
 		// Static assets from R2
@@ -119,6 +121,17 @@ export default {
 		// Daily cron: re-seed all cities
 		for (const slug of Object.keys(CITIES)) {
 			await seedCity(slug, env);
+		}
+		// Then re-process the NY OCA CSV if one is in R2 (user uploads it
+		// manually via /api/upload-raw — once per year when OCA publishes).
+		try {
+			const stub = new Request(
+				"https://internal/api/process-ny-oca?key=ny-oca/NYS-2025.csv.gz",
+			);
+			const res = await handleProcessNyOca(new URL(stub.url), env);
+			if (!res.ok) console.log("[cron] NY OCA reprocess skipped:", res.status);
+		} catch (e) {
+			console.log("[cron] NY OCA reprocess error:", e);
 		}
 	},
 };
@@ -606,13 +619,40 @@ async function handleUpload(
 	});
 }
 
+// ── API: Raw binary upload to R2 (CSVs, images, etc) ──
+// POSTs write the body directly to R2 under the given key. Auth via
+// UPLOAD_SECRET bearer token. Used when wrangler r2 put writes to a
+// different bucket instance than the Worker binding resolves (has
+// happened in this account — root cause unknown, binding-name and
+// bucket-name match). Going through the Worker guarantees the Worker
+// can read what it just wrote.
+async function handleUploadRaw(
+	request: Request,
+	url: URL,
+	env: Env,
+): Promise<Response> {
+	const authHeader = request.headers.get("Authorization") || "";
+	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+	if (!env.UPLOAD_SECRET || token !== env.UPLOAD_SECRET) {
+		return json({ error: "Unauthorized" }, 401);
+	}
+	const key = url.searchParams.get("key");
+	if (!key) return json({ error: "key required" }, 400);
+	const contentType =
+		request.headers.get("Content-Type") || "application/octet-stream";
+	await env.DATA.put(key, request.body, {
+		httpMetadata: { contentType },
+	});
+	return json({ uploaded: key, contentType });
+}
+
 // ── API: Process NY OCA CSV stored in R2 ──
 // User uploads the raw CSV once (via wrangler r2 put ny-oca/NYS-YYYY.csv),
 // then this endpoint streams it, aggregates per-judge, and writes the
 // result to courts/new-york.json — all inside a single Worker invocation.
 // Stream-based to stay within CPU/memory limits on 100MB+ files.
 async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
-	const key = url.searchParams.get("key") || "ny-oca/NYS-2025.csv";
+	const key = url.searchParams.get("key") || "ny-oca/NYS-2025.csv.gz";
 	const includeAll = url.searchParams.get("all") === "true";
 
 	const obj = await env.DATA.get(key);
@@ -627,7 +667,14 @@ async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
 		"richmond",
 	]);
 
-	const reader = obj.body.getReader();
+	// Auto-decompress .gz objects using CF Worker's DecompressionStream.
+	// Keeps the uploaded CSV under the 100MB Worker request-body cap
+	// (NY OCA full-year CSVs are ~100–150MB raw, ~15–25MB gzipped).
+	const rawStream = obj.body as ReadableStream<Uint8Array>;
+	const stream = key.endsWith(".gz")
+		? rawStream.pipeThrough(new DecompressionStream("gzip"))
+		: rawStream;
+	const reader = stream.getReader();
 	const decoder = new TextDecoder("utf-8");
 	let buf = "";
 	let headerMap: Map<string, number> | null = null;
