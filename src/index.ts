@@ -26,6 +26,7 @@ interface JudgeRecord {
 	source: string;
 	courtlistener_id?: number;
 	has_photo?: boolean;
+	bio?: string; // raw biographical paragraph (from official court directory pages)
 }
 
 interface MetricLabels {
@@ -134,6 +135,16 @@ export default {
 			if (!res.ok) console.log("[cron] NY OCA reprocess skipped:", res.status);
 		} catch (e) {
 			console.log("[cron] NY OCA reprocess error:", e);
+		}
+		// Finally enrich NY bios from NYC.gov Mayor's Advisory Committee pages
+		try {
+			const stub = new Request(
+				"https://internal/api/enrich-bios?slug=new-york",
+			);
+			const res = await handleEnrichBios(new URL(stub.url), env);
+			if (!res.ok) console.log("[cron] NY bio enrich skipped:", res.status);
+		} catch (e) {
+			console.log("[cron] NY bio enrich error:", e);
 		}
 	},
 };
@@ -756,57 +767,80 @@ async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
 		}
 	>();
 
+	// Real NYC MACJ page structure:
+	//   <div class="faq-questions" data-answer="SLUG"><p>Judge Name</p></div>
+	//   <div id="SLUG" class="faq-answers"><p>Bio paragraph...</p></div>
 	for (const srcUrl of sources) {
-		let currentName: string | null = null;
-		let currentBio: string[] = [];
+		let mode: "question" | "answer" | null = null;
+		let currentSlug = "";
+		const nameBySlug = new Map<string, string>();
+		const bioBySlug = new Map<string, string[]>();
 		try {
 			const res = await fetch(srcUrl, {
 				headers: { "User-Agent": "JudgeSearchBot/1.0 (accountability)" },
 			});
 			if (!res.ok) continue;
 			const rewriter = new HTMLRewriter()
-				.on("h3, h2, .panel-heading, summary", {
-					text(t) {
-						const s = t.text.trim();
-						if (/^Judge\s+/i.test(s) && currentName) {
-							// Commit current judge before moving to next
-							const bioText = currentBio.join(" ").replace(/\s+/g, " ").trim();
-							const m = bios.get(currentName) || {
-								bio: "",
-								education: [],
-							};
-							m.bio = bioText;
-							// Extract basic fields from bio text
-							const edu = bioText.match(
-								/\b(?:degree|graduated|graduate|JD|LLB|MBA|Ph\.?D|B\.A\.?|B\.S\.?|M\.A\.?)\b[^.]*\./gi,
-							);
-							if (edu) m.education = edu.slice(0, 3).map((e) => e.trim());
-							const apt = bioText.match(
-								/appointed\s+by\s+(?:then-)?(?:Mayor|Gov\.?|Governor|President)\s+[A-Z][a-z]+\s+[A-Z][a-z]+/i,
-							);
-							if (apt) m.appointed_by = apt[0];
-							const date = bioText.match(
-								/\b(?:appointed|elected|joined)\s+(?:on\s+)?(?:in\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
-							);
-							if (date) m.date_start = date[0];
-							bios.set(currentName, m);
-						}
-						if (/^Judge\s+/i.test(s) && t.lastInTextNode) {
-							currentName = s.replace(/^Judge\s+/i, "").trim();
-							currentBio = [];
-						}
+				.on(".faq-questions", {
+					element(el) {
+						mode = "question";
+						currentSlug = el.getAttribute("data-answer") || "";
 					},
 				})
-				.on("p, div.bio, div.panel-body", {
+				.on(".faq-answers", {
+					element(el) {
+						mode = "answer";
+						currentSlug = el.getAttribute("id") || "";
+						if (currentSlug && !bioBySlug.has(currentSlug))
+							bioBySlug.set(currentSlug, []);
+					},
+				})
+				.on(".faq-questions p, .faq-answers p", {
 					text(t) {
-						if (currentName) currentBio.push(t.text);
+						if (!currentSlug) return;
+						if (mode === "question") {
+							const s = t.text.trim();
+							if (s && !nameBySlug.has(currentSlug)) {
+								nameBySlug.set(currentSlug, s.replace(/^Judge\s+/i, ""));
+							}
+						} else if (mode === "answer") {
+							const arr = bioBySlug.get(currentSlug) || [];
+							arr.push(t.text);
+							bioBySlug.set(currentSlug, arr);
+						}
 					},
 				});
 			await rewriter.transform(res).arrayBuffer();
-			// Commit the last judge
-			if (currentName) {
-				const bioText = currentBio.join(" ").replace(/\s+/g, " ").trim();
-				bios.set(currentName, { bio: bioText, education: [] });
+			for (const [slug2, name] of nameBySlug) {
+				const bioText = (bioBySlug.get(slug2) || [])
+					.join(" ")
+					.replace(/\s+/g, " ")
+					.trim();
+				if (!bioText || !name) continue;
+				const m: {
+					bio: string;
+					education: string[];
+					appointed_by?: string;
+					date_start?: string;
+				} = { bio: bioText, education: [] };
+				// Education regex: match "graduated from X" or "degree from Y" —
+				// capture up to a period that isn't followed by a capital-D-period
+				// pattern (e.g., "J.D." or "Ph.D." mid-sentence).
+				const eduMatches =
+					bioText.match(
+						/\b(?:graduated from|a graduate of|received (?:his|her|their)[^.]*(?:degree|J\.?D\.?|LL\.?B\.?|M\.?B\.?A\.?|Ph\.?D\.?)[^.]*)(?:\s+[A-Z][a-zA-Z.&,\s]+?)(?=\.[\s\n])/gi,
+					) || [];
+				if (eduMatches.length)
+					m.education = eduMatches.slice(0, 3).map((e) => e.trim());
+				const apt = bioText.match(
+					/appointed\s+by\s+(?:then-)?(?:Mayor|Gov\.?|Governor|President)\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)+/i,
+				);
+				if (apt) m.appointed_by = apt[0].replace(/^appointed\s+by\s+/i, "");
+				const date = bioText.match(
+					/\b(?:appointed|elected|joined)\s+(?:on\s+)?(?:in\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}?,?\s+\d{4}/i,
+				);
+				if (date) m.date_start = date[0];
+				bios.set(name, m);
 			}
 		} catch {
 			// try next source
@@ -875,6 +909,10 @@ async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
 		}
 		if (!judge.date_start && data.date_start) {
 			judge.date_start = data.date_start;
+		}
+		if (!judge.bio && data.bio) {
+			// Cap raw bio at 1000 chars to keep R2 objects small
+			judge.bio = data.bio.slice(0, 1000);
 		}
 	}
 
