@@ -93,6 +93,7 @@ export default {
 		if (p === "/api/worst") return handleWorst(url, env);
 		if (p === "/api/upload" && request.method === "POST")
 			return handleUpload(request, url, env);
+		if (p === "/api/process-ny-oca") return handleProcessNyOca(url, env);
 
 		// Static assets from R2
 		if (p === "/favicon.png" || p === "/favicon.svg" || p === "/og-image.png") {
@@ -602,6 +603,216 @@ async function handleUpload(
 		judges: parsed.judges.length,
 		cases: parsed.total_cases,
 		last_fresh_data: parsed.last_fresh_data,
+	});
+}
+
+// ── API: Process NY OCA CSV stored in R2 ──
+// User uploads the raw CSV once (via wrangler r2 put ny-oca/NYS-YYYY.csv),
+// then this endpoint streams it, aggregates per-judge, and writes the
+// result to courts/new-york.json — all inside a single Worker invocation.
+// Stream-based to stay within CPU/memory limits on 100MB+ files.
+async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
+	const key = url.searchParams.get("key") || "ny-oca/NYS-2025.csv";
+	const includeAll = url.searchParams.get("all") === "true";
+
+	const obj = await env.DATA.get(key);
+	if (!obj) return json({ error: `R2 object not found: ${key}` }, 404);
+
+	const NYC_COUNTIES = new Set([
+		"bronx",
+		"kings",
+		"new york",
+		"new york county",
+		"queens",
+		"richmond",
+	]);
+
+	const reader = obj.body.getReader();
+	const decoder = new TextDecoder("utf-8");
+	let buf = "";
+	let headerMap: Map<string, number> | null = null;
+	let iJudge = -1;
+	let iCounty = -1;
+	let iCourt = -1;
+	let iFta = -1;
+	let iRearrest = -1;
+	let iRevoc = -1;
+	const byJudge = new Map<
+		string,
+		{
+			county: string;
+			court: string;
+			total: number;
+			fta: number;
+			rearrest: number;
+			revoc: number;
+		}
+	>();
+	let rows = 0;
+	let filtered = 0;
+
+	const parseLine = (line: string): string[] => {
+		const out: string[] = [];
+		let b = "";
+		let inQ = false;
+		for (let i = 0; i < line.length; i++) {
+			const c = line[i];
+			if (inQ) {
+				if (c === '"') {
+					if (line[i + 1] === '"') {
+						b += '"';
+						i++;
+					} else inQ = false;
+				} else b += c;
+			} else if (c === ",") {
+				out.push(b);
+				b = "";
+			} else if (c === '"') inQ = true;
+			else b += c;
+		}
+		out.push(b);
+		return out;
+	};
+	const truthy = (v: string | undefined): boolean => {
+		if (!v) return false;
+		const s = v.trim().toLowerCase();
+		return s === "y" || s === "yes" || s === "1" || s === "true";
+	};
+	const isRearrest = (v: string | undefined): boolean => {
+		if (!v) return false;
+		const s = v.trim().toLowerCase();
+		return !!s && s !== "no arrest" && s !== "null" && s !== "0" && s !== "n";
+	};
+
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		buf += decoder.decode(value, { stream: true });
+		let idx: number;
+		// biome-ignore lint/suspicious/noAssignInExpressions: loop pattern
+		while ((idx = buf.indexOf("\n")) >= 0) {
+			const line = buf.slice(0, idx).replace(/\r$/, "");
+			buf = buf.slice(idx + 1);
+			if (!line) continue;
+			const cols = parseLine(line);
+			if (!headerMap) {
+				headerMap = new Map(
+					cols.map((c, i) => [
+						c
+							.replace(/^\ufeff/, "")
+							.trim()
+							.toLowerCase(),
+						i,
+					]),
+				);
+				const pick = (names: string[]): number => {
+					for (const n of names) {
+						const v = headerMap?.get(n);
+						if (v !== undefined) return v;
+					}
+					return -1;
+				};
+				iJudge = pick(["judge_name"]);
+				iCounty = pick(["county_name"]);
+				iCourt = pick(["court_name"]);
+				iFta = pick(["warrant_ordered_btw_arraign_and_dispo"]);
+				iRearrest = pick(["rearrest"]);
+				iRevoc = pick(["remanded_to_jail_at_arraign"]);
+				if (iJudge < 0)
+					return json({ error: "judge column not found in CSV header" }, 422);
+				continue;
+			}
+			rows++;
+			const raw = (cols[iJudge] || "").trim();
+			if (!raw || raw.toLowerCase() === "unknown") continue;
+			const county = iCounty >= 0 ? (cols[iCounty] || "").trim() : "";
+			if (!includeAll && county && !NYC_COUNTIES.has(county.toLowerCase())) {
+				filtered++;
+				continue;
+			}
+			const name = raw
+				.toLowerCase()
+				.split(/\s+/)
+				.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+				.join(" ")
+				.trim();
+			let rec = byJudge.get(name);
+			if (!rec) {
+				rec = {
+					county,
+					court: iCourt >= 0 ? cols[iCourt] || "" : "",
+					total: 0,
+					fta: 0,
+					rearrest: 0,
+					revoc: 0,
+				};
+				byJudge.set(name, rec);
+			}
+			rec.total++;
+			if (iFta >= 0 && truthy(cols[iFta])) rec.fta++;
+			if (iRearrest >= 0 && isRearrest(cols[iRearrest])) rec.rearrest++;
+			if (iRevoc >= 0 && truthy(cols[iRevoc])) rec.revoc++;
+		}
+	}
+
+	const ranked = [...byJudge.entries()]
+		.filter(([, v]) => v.total >= 10)
+		.sort(([, a], [, b]) => b.total - a.total);
+
+	const judges: JudgeRecord[] = ranked.map(([name, v]) => ({
+		id: `nyoca-${name
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")}`,
+		name: `Judge ${name}`,
+		city: "New York",
+		state: "New York",
+		court: v.court || `${v.county} County Criminal Court`,
+		total_cases: v.total,
+		fta_count: v.fta,
+		rearrest_count: v.rearrest,
+		revocation_count: v.revoc,
+		source: "NY OCA Pretrial Release Data (Judiciary Law § 216(5))",
+	}));
+
+	const cityData: CityData = {
+		city: "New York",
+		state: "New York",
+		judges,
+		source:
+			"NY State Office of Court Administration — Pretrial Release Data (Judiciary Law § 216(5))",
+		last_updated: new Date().toISOString(),
+		last_fresh_data: new Date().toISOString(),
+		is_stale: false,
+		total_cases: judges.reduce((s, j) => s + j.total_cases, 0),
+		total_fta: judges.reduce((s, j) => s + j.fta_count, 0),
+		total_rearrests: judges.reduce((s, j) => s + j.rearrest_count, 0),
+		total_revocations: judges.reduce((s, j) => s + j.revocation_count, 0),
+		metric_labels: {
+			fta: "Missed Court",
+			rearrest: "Rearrested",
+			revocation: "Release Revoked",
+			fta_bar: "Bench Warrant Issued (Missed Court)",
+			rearrest_bar: "Rearrested While Case Pending",
+			revocation_bar: "Release Revoked / Remanded",
+			fta_bad: true,
+			rearrest_bad: true,
+			revocation_bad: true,
+		},
+	};
+	await env.DATA.put("courts/new-york.json", JSON.stringify(cityData), {
+		httpMetadata: { contentType: "application/json" },
+	});
+
+	return json({
+		processed: rows,
+		filtered_non_nyc: filtered,
+		unique_judges: byJudge.size,
+		judges_with_10plus_cases: judges.length,
+		total_cases: cityData.total_cases,
+		total_rearrests: cityData.total_rearrests,
+		total_fta: cityData.total_fta,
+		source_key: key,
 	});
 }
 

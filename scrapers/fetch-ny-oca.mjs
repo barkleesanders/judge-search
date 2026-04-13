@@ -52,6 +52,7 @@ const JUDGE_FIELDS = [
 const COUNTY_FIELDS = ["county", "court_county", "arraignment_county"];
 const COURT_FIELDS = ["court", "court_name", "arraignment_court"];
 const FTA_FIELDS = [
+	"warrant_ordered_btw_arraign_and_dispo",
 	"bench_warrant_issued",
 	"bench_warrant",
 	"bench_warrant_ind",
@@ -60,12 +61,13 @@ const FTA_FIELDS = [
 	"failed_to_appear",
 ];
 const REARREST_FIELDS = [
-	"rearrested_while_pending",
 	"rearrest",
+	"rearrested_while_pending",
 	"rearrest_ind",
 	"rearrested",
 ];
 const REVOCATION_FIELDS = [
+	"remanded_to_jail_at_arraign",
 	"release_revoked",
 	"revoked",
 	"revocation_ind",
@@ -118,6 +120,18 @@ function truthy(v) {
 		s === "t" ||
 		s === "issued"
 	);
+}
+
+// NY OCA's `rearrest` column is a severity string: "No Arrest" = no rearrest,
+// "NULL" / "" = unknown, anything else (Misdemeanor / Non-Violent Felony /
+// Violent Felony) = rearrested while case pending.
+function isRearrestString(v) {
+	if (v === undefined || v === null) return false;
+	const s = String(v).trim();
+	if (!s) return false;
+	const lc = s.toLowerCase();
+	if (lc === "no arrest" || lc === "null" || lc === "0" || lc === "n") return false;
+	return true;
 }
 
 function titleCase(s) {
@@ -252,7 +266,7 @@ async function main() {
 		}
 		rec.total++;
 		if (iFta >= 0 && truthy(cols[iFta])) rec.fta++;
-		if (iRearrest >= 0 && truthy(cols[iRearrest])) rec.rearrest++;
+		if (iRearrest >= 0 && isRearrestString(cols[iRearrest])) rec.rearrest++;
 		if (iRevoc >= 0 && truthy(cols[iRevoc])) rec.revoc++;
 	}
 
