@@ -92,6 +92,7 @@ export default {
 		if (p === "/api/cities") return handleCities(env);
 		if (p === "/api/worst") return handleWorst(url, env);
 		if (p === "/api/status") return handleStatus(env);
+		if (p === "/api/enrich-bios") return handleEnrichBios(url, env);
 		if (p === "/api/upload" && request.method === "POST")
 			return handleUpload(request, url, env);
 		if (p === "/api/upload-raw" && request.method === "POST")
@@ -711,6 +712,183 @@ async function handleStatus(env: Env): Promise<Response> {
 		generated_at: new Date().toISOString(),
 		cron_schedule: "0 6 * * * UTC (daily)",
 		cities: result,
+	});
+}
+
+// ── API: Enrich judge bios from official court directory pages ──
+// Workers-native — uses HTMLRewriter to stream-parse court websites that
+// publish authoritative judge bios (education, appointer, appointment
+// date, etc). CourtListener doesn't cover county/municipal judges, but
+// official court websites DO. This closes the bio-coverage gap.
+//
+// Sources:
+//   NYC → nyc.gov/site/macj/appointed/{criminal,family,civil}-court.page
+//         (authoritative — Mayor's Advisory Committee on the Judiciary)
+//
+// More sources can be added here. Each source page has a known HTML
+// pattern — we extract it with HTMLRewriter and merge bios into the
+// existing judges' records in R2 by fuzzy name match.
+async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
+	const slug = url.searchParams.get("slug") || "new-york";
+	if (slug !== "new-york") {
+		return json(
+			{
+				error:
+					"Only slug=new-york is wired at this time — directory-page scrapers are per-jurisdiction. Add a mapping in handleEnrichBios to support more cities.",
+			},
+			400,
+		);
+	}
+
+	const sources = [
+		"https://www.nyc.gov/site/macj/appointed/criminal-court.page",
+		"https://www.nyc.gov/site/macj/appointed/family-court.page",
+		"https://www.nyc.gov/site/macj/appointed/civil-court.page",
+	];
+
+	const bios = new Map<
+		string,
+		{
+			bio: string;
+			education: string[];
+			appointed_by?: string;
+			date_start?: string;
+		}
+	>();
+
+	for (const srcUrl of sources) {
+		let currentName: string | null = null;
+		let currentBio: string[] = [];
+		try {
+			const res = await fetch(srcUrl, {
+				headers: { "User-Agent": "JudgeSearchBot/1.0 (accountability)" },
+			});
+			if (!res.ok) continue;
+			const rewriter = new HTMLRewriter()
+				.on("h3, h2, .panel-heading, summary", {
+					text(t) {
+						const s = t.text.trim();
+						if (/^Judge\s+/i.test(s) && currentName) {
+							// Commit current judge before moving to next
+							const bioText = currentBio.join(" ").replace(/\s+/g, " ").trim();
+							const m = bios.get(currentName) || {
+								bio: "",
+								education: [],
+							};
+							m.bio = bioText;
+							// Extract basic fields from bio text
+							const edu = bioText.match(
+								/\b(?:degree|graduated|graduate|JD|LLB|MBA|Ph\.?D|B\.A\.?|B\.S\.?|M\.A\.?)\b[^.]*\./gi,
+							);
+							if (edu) m.education = edu.slice(0, 3).map((e) => e.trim());
+							const apt = bioText.match(
+								/appointed\s+by\s+(?:then-)?(?:Mayor|Gov\.?|Governor|President)\s+[A-Z][a-z]+\s+[A-Z][a-z]+/i,
+							);
+							if (apt) m.appointed_by = apt[0];
+							const date = bioText.match(
+								/\b(?:appointed|elected|joined)\s+(?:on\s+)?(?:in\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
+							);
+							if (date) m.date_start = date[0];
+							bios.set(currentName, m);
+						}
+						if (/^Judge\s+/i.test(s) && t.lastInTextNode) {
+							currentName = s.replace(/^Judge\s+/i, "").trim();
+							currentBio = [];
+						}
+					},
+				})
+				.on("p, div.bio, div.panel-body", {
+					text(t) {
+						if (currentName) currentBio.push(t.text);
+					},
+				});
+			await rewriter.transform(res).arrayBuffer();
+			// Commit the last judge
+			if (currentName) {
+				const bioText = currentBio.join(" ").replace(/\s+/g, " ").trim();
+				bios.set(currentName, { bio: bioText, education: [] });
+			}
+		} catch {
+			// try next source
+		}
+	}
+
+	// Merge into the city's judge records
+	const obj = await env.DATA.get(`courts/${slug}.json`);
+	if (!obj) return json({ error: `courts/${slug}.json not found` }, 404);
+	const city = JSON.parse(await obj.text()) as CityData;
+
+	// Normalize: the OCA CSV stores names like "Judge Berland, Susan A."
+	// while the MACJ pages use "Judge Susan Berland". Match by last-name
+	// + first-name-initial.
+	const extractKey = (
+		name: string,
+	): { last: string; firstInitial: string } | null => {
+		const clean = name
+			.replace(/^(Judge|Justice|Honorable|Hon\.?|The Honorable)\s+/i, "")
+			.trim();
+		let first: string;
+		let last: string;
+		if (clean.includes(",")) {
+			const [l, f] = clean.split(",", 2).map((s) => s.trim());
+			last = l.split(/\s+/)[0];
+			first = (f.split(/\s+/)[0] || "").replace(/\.$/, "");
+		} else {
+			const parts = clean.split(/\s+/);
+			if (parts.length < 2) return null;
+			last = parts[parts.length - 1];
+			first = parts[0];
+		}
+		if (!last || !first) return null;
+		return {
+			last: last.toLowerCase().replace(/[^a-z]/g, ""),
+			firstInitial: first[0].toLowerCase(),
+		};
+	};
+
+	const bioIndex = new Map<
+		string,
+		{
+			bio: string;
+			education: string[];
+			appointed_by?: string;
+			date_start?: string;
+		}
+	>();
+	for (const [name, data] of bios) {
+		const k = extractKey(name);
+		if (k) bioIndex.set(`${k.last}|${k.firstInitial}`, data);
+	}
+
+	let matched = 0;
+	for (const judge of city.judges) {
+		const k = extractKey(judge.name);
+		if (!k) continue;
+		const data = bioIndex.get(`${k.last}|${k.firstInitial}`);
+		if (!data) continue;
+		matched++;
+		if (!judge.education?.length && data.education.length) {
+			judge.education = data.education;
+		}
+		if (!judge.appointed_by && data.appointed_by) {
+			judge.appointed_by = data.appointed_by.replace(/^appointed\s+by\s+/i, "");
+		}
+		if (!judge.date_start && data.date_start) {
+			judge.date_start = data.date_start;
+		}
+	}
+
+	await env.DATA.put(`courts/${slug}.json`, JSON.stringify(city), {
+		httpMetadata: { contentType: "application/json" },
+	});
+
+	return json({
+		slug,
+		sources,
+		bios_found: bios.size,
+		judges_in_city: city.judges.length,
+		judges_enriched: matched,
+		coverage_pct: Math.round((matched / city.judges.length) * 100),
 	});
 }
 
