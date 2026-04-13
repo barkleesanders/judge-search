@@ -136,15 +136,19 @@ export default {
 		} catch (e) {
 			console.log("[cron] NY OCA reprocess error:", e);
 		}
-		// Finally enrich NY bios from NYC.gov Mayor's Advisory Committee pages
-		try {
-			const stub = new Request(
-				"https://internal/api/enrich-bios?slug=new-york",
-			);
-			const res = await handleEnrichBios(new URL(stub.url), env);
-			if (!res.ok) console.log("[cron] NY bio enrich skipped:", res.status);
-		} catch (e) {
-			console.log("[cron] NY bio enrich error:", e);
+		// Finally enrich bios across all cities: NY uses NYC.gov MACJ pages
+		// as primary source; every city then falls through to Wikidata SPARQL.
+		for (const city of Object.keys(CITIES)) {
+			try {
+				const stub = new Request(
+					`https://internal/api/enrich-bios?slug=${city}`,
+				);
+				const res = await handleEnrichBios(new URL(stub.url), env);
+				if (!res.ok)
+					console.log(`[cron] ${city} bio enrich skipped:`, res.status);
+			} catch (e) {
+				console.log(`[cron] ${city} bio enrich error:`, e);
+			}
 		}
 	},
 };
@@ -739,23 +743,35 @@ async function handleStatus(env: Env): Promise<Response> {
 // More sources can be added here. Each source page has a known HTML
 // pattern — we extract it with HTMLRewriter and merge bios into the
 // existing judges' records in R2 by fuzzy name match.
+// Per-city authoritative directory-page sources. Each uses the NYC MACJ
+// structure (faq-questions name / faq-answers bio). Cities with an empty
+// array still get Wikidata SPARQL fallback which works across all cities.
+const BIO_SOURCES: Record<string, string[]> = {
+	"new-york": [
+		"https://www.nyc.gov/site/macj/appointed/criminal-court.page",
+		"https://www.nyc.gov/site/macj/appointed/family-court.page",
+		"https://www.nyc.gov/site/macj/appointed/civil-court.page",
+	],
+	miami: [],
+	chicago: [],
+	atlanta: [],
+	"san-francisco": [],
+	texas: [],
+	"los-angeles": [],
+	seattle: [],
+};
+
 async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
 	const slug = url.searchParams.get("slug") || "new-york";
-	if (slug !== "new-york") {
+	if (!(slug in BIO_SOURCES)) {
 		return json(
 			{
-				error:
-					"Only slug=new-york is wired at this time — directory-page scrapers are per-jurisdiction. Add a mapping in handleEnrichBios to support more cities.",
+				error: `Unknown slug: ${slug}. Supported: ${Object.keys(BIO_SOURCES).join(", ")}`,
 			},
 			400,
 		);
 	}
-
-	const sources = [
-		"https://www.nyc.gov/site/macj/appointed/criminal-court.page",
-		"https://www.nyc.gov/site/macj/appointed/family-court.page",
-		"https://www.nyc.gov/site/macj/appointed/civil-court.page",
-	];
+	const sources = BIO_SOURCES[slug];
 
 	const bios = new Map<
 		string,
@@ -916,6 +932,104 @@ async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
 		}
 	}
 
+	// Wikidata SPARQL fallback — works across ALL cities, fills in famous
+	// judges not found in directory pages. Each batched SPARQL query can
+	// look up up to 25 judges at once by exact rdfs:label match.
+	let wikiEnriched = 0;
+	const needsBio = city.judges.filter((j) => !j.bio && !j.born);
+	if (needsBio.length > 0) {
+		// Extract canonical "First Last" names (strips titles, handles
+		// "Last, First" OCA format). Wikidata labels judges as "First Last".
+		const nameFor = (name: string): string | null => {
+			const clean = name
+				.replace(/^(Judge|Justice|Honorable|Hon\.?|The Honorable)\s+/i, "")
+				.trim();
+			if (clean.includes(",")) {
+				const [l, f] = clean.split(",", 2).map((s) => s.trim());
+				const first = (f.split(/\s+/)[0] || "").replace(/\.$/, "");
+				if (!first || !l) return null;
+				return `${first} ${l.split(/\s+/)[0]}`;
+			}
+			return clean;
+		};
+		const batchSize = 20;
+		for (let i = 0; i < needsBio.length; i += batchSize) {
+			const batch = needsBio.slice(i, i + batchSize);
+			const labels = batch
+				.map((j) => nameFor(j.name))
+				.filter((n): n is string => !!n)
+				.map((n) => `"${n.replace(/"/g, '\\"')}"@en`);
+			if (!labels.length) continue;
+			const query = `
+				SELECT DISTINCT ?name ?dob ?birthplaceLabel ?educationLabel ?occupationLabel WHERE {
+					VALUES ?name { ${labels.join(" ")} }
+					?item rdfs:label ?name;
+					      wdt:P106 ?occupation.
+					FILTER EXISTS { ?item wdt:P106 ?j. FILTER(?j IN (wd:Q16533, wd:Q185351)) }
+					OPTIONAL { ?item wdt:P569 ?dob. }
+					OPTIONAL { ?item wdt:P19 ?birthplace. }
+					OPTIONAL { ?item wdt:P69 ?education. }
+					SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+				} LIMIT 100
+			`
+				.replace(/\s+/g, " ")
+				.trim();
+			try {
+				const wdRes = await fetch(
+					`https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}`,
+					{
+						headers: {
+							Accept: "application/sparql-results+json",
+							"User-Agent": "JudgeSearchBot/1.0 (accountability)",
+						},
+					},
+				);
+				if (!wdRes.ok) continue;
+				const wd = (await wdRes.json()) as {
+					results?: { bindings?: Array<Record<string, { value?: string }>> };
+				};
+				const wdByName = new Map<
+					string,
+					{ dob?: string; birthplace?: string; education?: string }
+				>();
+				for (const b of wd.results?.bindings || []) {
+					const n = b.name?.value;
+					if (!n) continue;
+					const clean = n.replace(/@en$/, "");
+					const entry = wdByName.get(clean) || {};
+					if (b.dob?.value && !entry.dob) entry.dob = b.dob.value.slice(0, 10);
+					if (b.birthplaceLabel?.value && !entry.birthplace)
+						entry.birthplace = b.birthplaceLabel.value;
+					if (b.educationLabel?.value && !entry.education)
+						entry.education = b.educationLabel.value;
+					wdByName.set(clean, entry);
+				}
+				for (const j of batch) {
+					const n = nameFor(j.name);
+					if (!n) continue;
+					const match = wdByName.get(n);
+					if (!match) continue;
+					let changed = false;
+					if (!j.born && match.dob) {
+						j.born = match.dob;
+						changed = true;
+					}
+					if (!j.birthplace && match.birthplace) {
+						j.birthplace = match.birthplace;
+						changed = true;
+					}
+					if (!j.education?.length && match.education) {
+						j.education = [match.education];
+						changed = true;
+					}
+					if (changed) wikiEnriched++;
+				}
+			} catch {
+				/* skip batch on failure */
+			}
+		}
+	}
+
 	await env.DATA.put(`courts/${slug}.json`, JSON.stringify(city), {
 		httpMetadata: { contentType: "application/json" },
 	});
@@ -925,8 +1039,12 @@ async function handleEnrichBios(url: URL, env: Env): Promise<Response> {
 		sources,
 		bios_found: bios.size,
 		judges_in_city: city.judges.length,
-		judges_enriched: matched,
-		coverage_pct: Math.round((matched / city.judges.length) * 100),
+		judges_enriched_from_directory: matched,
+		judges_enriched_from_wikidata: wikiEnriched,
+		total_enriched: matched + wikiEnriched,
+		coverage_pct: Math.round(
+			((matched + wikiEnriched) / city.judges.length) * 100,
+		),
 	});
 }
 
