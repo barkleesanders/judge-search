@@ -2,22 +2,34 @@
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#0a0a0a"/>
-      <stop offset="100%" style="stop-color:#111111"/>
+      <stop offset="100%" style="stop-color:#151010"/>
     </linearGradient>
     <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" style="stop-color:#c8a84b"/>
       <stop offset="100%" style="stop-color:#e0c96a"/>
     </linearGradient>
+    <linearGradient id="redFade" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#e84040" stop-opacity="0.08"/>
+      <stop offset="100%" style="stop-color:#e84040" stop-opacity="0"/>
+    </linearGradient>
   </defs>
+
   <!-- Background -->
   <rect width="1200" height="630" fill="url(#bg)"/>
-  <!-- Top accent line -->
+  <rect x="0" y="0" width="600" height="630" fill="url(#redFade)"/>
+
+  <!-- Top + bottom gold bars -->
   <rect x="0" y="0" width="1200" height="3" fill="url(#gold)"/>
-  <!-- Bottom accent line -->
   <rect x="0" y="627" width="1200" height="3" fill="url(#gold)"/>
 
+  <!-- Tag line -->
+  <g transform="translate(70, 80)">
+    <rect x="0" y="0" width="210" height="30" rx="15" fill="rgba(232,64,64,0.08)" stroke="rgba(232,64,64,0.35)" stroke-width="1"/>
+    <text x="22" y="20" font-family="'IBM Plex Mono', monospace" font-size="12" letter-spacing="2" fill="#e84040" font-weight="500">PUBLIC COURT RECORDS</text>
+  </g>
+
   <!-- Scales icon (left side) -->
-  <g transform="translate(200,200) scale(2.5)">
+  <g transform="translate(140,245) scale(2.4)">
     <rect x="-2" y="8" width="4" height="32" fill="#c8a84b" rx="1"/>
     <rect x="-14" y="38" width="28" height="4" fill="#c8a84b" rx="2"/>
     <rect x="-18" y="6" width="36" height="3" fill="#c8a84b" rx="1.5"/>
@@ -29,31 +41,70 @@
     <path d="M10,18 Q16,24 22,18" fill="none" stroke="#c8a84b" stroke-width="1.5"/>
   </g>
 
-  <!-- Title text -->
-  <text x="420" y="250" font-family="Georgia, serif" font-size="72" font-weight="800" fill="#f0ece4">JudgeSearch</text>
+  <!-- Title -->
+  <text x="70" y="230" font-family="Georgia, 'Playfair Display', serif" font-size="76" font-weight="800" fill="#f0ece4">JudgeSearch</text>
 
   <!-- Tagline -->
-  <text x="420" y="310" font-family="Georgia, serif" font-size="32" font-style="italic" fill="#c8a84b">Know your judges. Hold them accountable.</text>
+  <text x="70" y="285" font-family="Georgia, 'Playfair Display', serif" font-size="30" font-style="italic" fill="#c8a84b">Know your judges. Hold them accountable.</text>
 
   <!-- Description -->
-  <text x="420" y="380" font-family="monospace" font-size="18" fill="#a09a8c">Search real court records across 8 U.S. cities.</text>
-  <text x="420" y="410" font-family="monospace" font-size="18" fill="#a09a8c">880,000+ cases. Public data. Sorted by impact.</text>
+  <text x="70" y="340" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="19" fill="#a09a8c">Real court records. 8 U.S. cities. 881,000+ cases.</text>
+  <text x="70" y="370" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="19" fill="#a09a8c">Plain English. Sorted by impact. No sign-up.</text>
 
   <!-- Stats boxes -->
-  <g transform="translate(420, 450)">
-    <rect x="0" y="0" width="140" height="60" rx="6" fill="#161616" stroke="#333" stroke-width="1"/>
-    <text x="70" y="28" text-anchor="middle" font-family="Georgia, serif" font-size="22" font-weight="800" fill="#c8a84b">8</text>
-    <text x="70" y="48" text-anchor="middle" font-family="monospace" font-size="10" fill="#6b6560" letter-spacing="1">CITIES</text>
+  <g transform="translate(70, 410)">
+    <rect x="0" y="0" width="145" height="72" rx="8" fill="#161616" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="72" y="36" text-anchor="middle" font-family="Georgia, serif" font-size="28" font-weight="800" fill="#c8a84b">8</text>
+    <text x="72" y="58" text-anchor="middle" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#6b6560" letter-spacing="2">CITIES</text>
 
-    <rect x="160" y="0" width="140" height="60" rx="6" fill="#161616" stroke="#333" stroke-width="1"/>
-    <text x="230" y="28" text-anchor="middle" font-family="Georgia, serif" font-size="22" font-weight="800" fill="#f0ece4">225+</text>
-    <text x="230" y="48" text-anchor="middle" font-family="monospace" font-size="10" fill="#6b6560" letter-spacing="1">JUDGES</text>
+    <rect x="165" y="0" width="145" height="72" rx="8" fill="#161616" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="237" y="36" text-anchor="middle" font-family="Georgia, serif" font-size="28" font-weight="800" fill="#f0ece4">225+</text>
+    <text x="237" y="58" text-anchor="middle" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#6b6560" letter-spacing="2">JUDGES</text>
 
-    <rect x="320" y="0" width="140" height="60" rx="6" fill="#161616" stroke="#333" stroke-width="1"/>
-    <text x="390" y="28" text-anchor="middle" font-family="Georgia, serif" font-size="22" font-weight="800" fill="#e84040">881K</text>
-    <text x="390" y="48" text-anchor="middle" font-family="monospace" font-size="10" fill="#6b6560" letter-spacing="1">CASES</text>
+    <rect x="330" y="0" width="145" height="72" rx="8" fill="#161616" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="402" y="36" text-anchor="middle" font-family="Georgia, serif" font-size="28" font-weight="800" fill="#e84040">881K</text>
+    <text x="402" y="58" text-anchor="middle" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#6b6560" letter-spacing="2">CASES</text>
   </g>
 
-  <!-- URL -->
-  <text x="600" y="590" text-anchor="middle" font-family="monospace" font-size="16" fill="#6b6560">judge-search.barkleesanders.workers.dev</text>
+  <!-- Right side: data sources panel -->
+  <g transform="translate(760, 80)">
+    <text x="0" y="12" font-family="'IBM Plex Mono', monospace" font-size="11" letter-spacing="3" fill="#c8a84b" font-weight="600">DATA SOURCES</text>
+    <line x1="0" y1="24" x2="380" y2="24" stroke="#2a2a2a" stroke-width="1"/>
+
+    <!-- Each city: name — source -->
+    <g transform="translate(0, 50)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">Miami · FL</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">CourtWatch.us · Fla. Stat. 907.043</text>
+    </g>
+    <g transform="translate(0, 100)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">Chicago · Cook County</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">datacatalog.cookcountyil.gov (Socrata)</text>
+    </g>
+    <g transform="translate(0, 150)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">Atlanta · Fulton County</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">sharefulton.fultoncountyga.gov</text>
+    </g>
+    <g transform="translate(0, 200)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">San Francisco</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">data.sfgov.org · DA case resolutions</text>
+    </g>
+    <g transform="translate(0, 250)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">Houston · Harris County</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">jpwebsite.harriscountytx.gov</text>
+    </g>
+    <g transform="translate(0, 300)">
+      <text x="0" y="0" font-family="Georgia, serif" font-size="14" font-weight="700" fill="#f0ece4">NYC · LA · Seattle</text>
+      <text x="0" y="18" font-family="'IBM Plex Sans', sans-serif" font-size="11" fill="#6b6560">CourtListener (Free Law Project) + city arrests</text>
+    </g>
+
+    <!-- CC0 / open-data badge -->
+    <g transform="translate(0, 390)">
+      <rect x="0" y="0" width="360" height="56" rx="6" fill="rgba(200,168,75,0.06)" stroke="rgba(200,168,75,0.25)" stroke-width="1"/>
+      <text x="18" y="22" font-family="'IBM Plex Mono', monospace" font-size="10" letter-spacing="2" fill="#c8a84b" font-weight="600">OPEN-DATA APIS</text>
+      <text x="18" y="42" font-family="'IBM Plex Sans', sans-serif" font-size="11.5" fill="#a09a8c">No scraping. No paywalls. Verify every number.</text>
+    </g>
+  </g>
+
+  <!-- URL footer -->
+  <text x="600" y="590" text-anchor="middle" font-family="'IBM Plex Mono', monospace" font-size="14" fill="#6b6560">judge-search.barkleesanders.workers.dev</text>
 </svg>
