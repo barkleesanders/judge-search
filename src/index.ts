@@ -91,6 +91,7 @@ export default {
 		if (p === "/api/seed") return handleSeed(url, env);
 		if (p === "/api/cities") return handleCities(env);
 		if (p === "/api/worst") return handleWorst(url, env);
+		if (p === "/api/status") return handleStatus(env);
 		if (p === "/api/upload" && request.method === "POST")
 			return handleUpload(request, url, env);
 		if (p === "/api/upload-raw" && request.method === "POST")
@@ -384,7 +385,7 @@ async function handleWorst(url: URL, env: Env): Promise<Response> {
 		returned: top.length,
 		judges: top,
 		methodology:
-			"Danger score = (rearrest_rate × 2 + fta_rate × 1 + revocation_rate × 0.5) × log10(cases+1) × 100. Only includes judges in cities whose data actually measures rearrests-while-on-pretrial-release, and only judges with ≥" +
+			"Risk Score (0–100) = (0.5 × rearrest_rate + 0.3 × fta_rate + 0.2 × revocation_rate) × 100 × volume_confidence, where volume_confidence = min(1, log10(cases+1) / log10(101)). Only includes judges in cities whose data actually measures rearrests-while-on-pretrial-release, and only judges with ≥" +
 			minCases +
 			" cases. Missing from rankings: cities that report convictions/transfers (not rearrests) and cities without per-judge case data.",
 	});
@@ -483,6 +484,43 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 			metric_labels = r.metric_labels;
 			city_stats = r.city_stats;
 			await enrichWithDocketCounts(judges, env.COURTLISTENER_TOKEN);
+		} else if (slug === "san-francisco") {
+			// SF judge-level data is manually curated (per-judge DA outcomes
+			// aren't on DataSF). Preserve existing judges and refresh the
+			// city_stats from DataSF so the page always shows a current
+			// last-updated timestamp.
+			const r = await scrapeSanFranciscoStats();
+			if (existing && existing.total_cases > 0) {
+				// Preserve existing judges; update city_stats from Socrata
+				const merged: CityData = {
+					...existing,
+					last_updated: new Date().toISOString(),
+					is_stale: isOlderThanDays(existing.last_fresh_data, 30),
+					city_stats: r.city_stats || existing.city_stats,
+				};
+				await env.DATA.put(`courts/${slug}.json`, JSON.stringify(merged));
+				return merged;
+			}
+			judges = [];
+			source = r.source;
+			city_stats = r.city_stats;
+		} else if (slug === "texas") {
+			// Same pattern as SF — Harris County's only open judge-level source
+			// is a Shiny app (no API). Preserve existing judges, keep cron fresh.
+			const r = await scrapeTexasStats();
+			if (existing && existing.total_cases > 0) {
+				const merged: CityData = {
+					...existing,
+					last_updated: new Date().toISOString(),
+					is_stale: isOlderThanDays(existing.last_fresh_data, 30),
+					city_stats: r.city_stats || existing.city_stats,
+				};
+				await env.DATA.put(`courts/${slug}.json`, JSON.stringify(merged));
+				return merged;
+			}
+			judges = [];
+			source = r.source;
+			city_stats = r.city_stats;
 		} else {
 			// No live scraper — skip entirely if we have existing data
 			if (existing && existing.total_cases > 0) {
@@ -624,6 +662,55 @@ async function handleUpload(
 		judges: parsed.judges.length,
 		cases: parsed.total_cases,
 		last_fresh_data: parsed.last_fresh_data,
+	});
+}
+
+// ── API: Scraper freshness status across all 8 cities ──
+// Lists which scrapers are live-automated vs manual, when each city was
+// last refreshed, and how stale the data is. Drop this URL into a status
+// page or monitoring system to catch silent scraper failures.
+async function handleStatus(env: Env): Promise<Response> {
+	const SCRAPER_TYPE: Record<string, string> = {
+		miami: "live (CourtWatch API)",
+		chicago: "live (Cook County Socrata)",
+		atlanta: "live (Fulton County Socrata)",
+		"los-angeles": "live (CourtListener text search + data.lacity.org arrests)",
+		seattle: "live (CourtListener text search + data.kingcounty.gov bookings)",
+		"new-york":
+			"live (NY OCA CSV processor from R2 + CourtListener + NYC arrests)",
+		"san-francisco":
+			"hybrid (judges curated · DataSF stats daily · protective merge)",
+		texas:
+			"hybrid (judges curated · Houston OpenData stats daily · protective merge)",
+	};
+	const result: Array<Record<string, unknown>> = [];
+	for (const slug of Object.keys(CITIES)) {
+		const obj = await env.DATA.get(`courts/${slug}.json`);
+		if (!obj) {
+			result.push({ slug, status: "missing" });
+			continue;
+		}
+		const d = JSON.parse(await obj.text()) as CityData;
+		const lastFresh = d.last_fresh_data ? new Date(d.last_fresh_data) : null;
+		const ageDays = lastFresh
+			? Math.round((Date.now() - lastFresh.getTime()) / 86400000)
+			: null;
+		result.push({
+			slug,
+			scraper: SCRAPER_TYPE[slug] || "unknown",
+			judges: d.judges.length,
+			total_cases: d.total_cases,
+			last_updated: d.last_updated,
+			last_fresh_data: d.last_fresh_data || null,
+			age_days: ageDays,
+			is_stale: d.is_stale || false,
+			has_city_stats: !!d.city_stats,
+		});
+	}
+	return json({
+		generated_at: new Date().toISOString(),
+		cron_schedule: "0 6 * * * UTC (daily)",
+		cities: result,
 	});
 }
 
@@ -1578,6 +1665,56 @@ async function scrapeNewYork(_cityName: string): Promise<{
 					label: "NYPD arrests year-to-date",
 					source: "data.cityofnewyork.us NYPD Arrest Data",
 					note: "City-wide total — NY State court system does not publish per-judge case data via public API",
+				}
+			: undefined,
+	};
+}
+
+// ── San Francisco: city-level DA stats refresh (judge-level is manually curated) ──
+// Judge data comes from Stop Crime Action report cards + curated DataSF joins
+// (no per-judge Socrata feed exists for SF). This just keeps city-wide DA
+// resolution volume fresh so the page always shows a recent timestamp.
+async function scrapeSanFranciscoStats(): Promise<{
+	source: string;
+	city_stats?: CityStats;
+}> {
+	const total = await socrataCount(
+		"https://data.sfgov.org/resource/ynfy-z5kt.json?$select=count(*)",
+	);
+	return {
+		source:
+			"Stop Crime Action Judge Report Cards (per-judge) + DataSF DA Case Resolutions (city-wide refresh)",
+		city_stats: total
+			? {
+					annual_arrests: total,
+					label: "DA case resolutions on record",
+					source: "data.sfgov.org · DA Case Resolutions (ynfy-z5kt)",
+					note: "Per-judge SF data is curated from Stop Crime Action report cards. DataSF total updates daily.",
+				}
+			: undefined,
+	};
+}
+
+// ── Texas / Harris County: city-level stats refresh ──
+// Harris County's only public per-judge data is a Shiny dashboard (no API).
+// We keep existing judge data and refresh stats from secondary public sources.
+async function scrapeTexasStats(): Promise<{
+	source: string;
+	city_stats?: CityStats;
+}> {
+	// Houston city arrest data (City of Houston open data)
+	const arrests = await socrataCount(
+		"https://data.houstontx.gov/resource/hz6g-h7f6.json?$select=count(*)",
+	);
+	return {
+		source:
+			"Harris County Criminal Court Data Dashboard (per-judge) + Houston OpenData (city-wide refresh)",
+		city_stats: arrests
+			? {
+					annual_arrests: arrests,
+					label: "Houston public incidents on record",
+					source: "data.houstontx.gov",
+					note: "Per-judge Harris County data is curated from public records. City-wide stats refreshed daily.",
 				}
 			: undefined,
 	};
