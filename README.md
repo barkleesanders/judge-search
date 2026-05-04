@@ -22,7 +22,7 @@ For each judge, where the data is available:
 | Miami, FL | Per-judge pretrial outcomes | [CourtWatch.us](https://courtwatch.us) (FSS 907.043) |
 | Chicago / Cook County, IL | 700K+ case dispositions per judge | [Cook County Open Data](https://datacatalog.cookcountyil.gov) (Socrata `apwk-dzx8`) |
 | Atlanta / Fulton County, GA | 91K+ case dispositions per judge | [ShareFulton](https://sharefulton.fultoncountyga.gov) (Socrata `uww8-gu28`) |
-| San Francisco, CA | 12K+ DA case resolutions per judge | [DataSF](https://data.sfgov.org) (Socrata) |
+| San Francisco, CA | Per-judge dispositions, FTAs, revocations from SF Superior Court dockets + DA feeds + 10.500 release | [jamiequint/sf_criminal_court](https://huggingface.co/datasets/jamiequint/sf_criminal_court) (HF, CC-BY-NC-4.0) + [DataSF](https://data.sfgov.org) (city-wide refresh) |
 | Houston / Harris County, TX | Criminal case outcomes per judge | [Harris County JP Public Data Extract](https://jpwebsite.harriscountytx.gov/PublicExtracts/search.jsp) |
 | New York, NY | Per-judge opinion counts + NYPD arrests | [CourtListener](https://www.courtlistener.com) + [NYC OpenData](https://data.cityofnewyork.us) `uip8-fykc` |
 | Los Angeles, CA | Per-judge opinion counts + LAPD arrests | [CourtListener](https://www.courtlistener.com) + [LA OpenData](https://data.lacity.org) `amvf-fr72` |
@@ -64,6 +64,36 @@ npx wrangler secret put COURTLISTENER_TOKEN  # for per-judge opinion enrichment 
 ```
 
 Get a free CourtListener token at https://www.courtlistener.com/register/.
+
+### Offline SF pipeline (jamiequint/sf_criminal_court HF dataset)
+
+Real per-judge SF data — dispositions, FTA (bench-warrant) signals, and
+probation/PRCS/parole revocations — built from Jamie Quint's published
+parquet files (combining a scraped SF Superior Court docket, DA open-data
+feeds, and the SFSC charge-disposition spreadsheet released under
+California Rules of Court rule 10.500).
+
+License: **CC-BY-NC-4.0** (non-commercial). Attribution: Jamie Quint.
+
+Requires `duckdb` CLI (`brew install duckdb`). Reads parquet directly
+over HTTPS from Hugging Face — no manual download needed.
+
+```bash
+# Dry-run: queries HF, computes per-judge metrics, writes
+# scrapers/.tmp-san-francisco.json so you can sanity-check before upload.
+node scrapers/fetch-sf-hf.mjs
+
+# Upload to the Worker (uses /api/upload bearer auth).
+UPLOAD_SECRET=<your-secret> node scrapers/fetch-sf-hf.mjs --upload
+```
+
+Flags: `--min-cases <N>` (default 25), `--rearrest-window <D>` (default 365
+days), `--cache-dir <path>` (cache parquet locally for repeat runs),
+`--worker <url>` (override worker URL).
+
+Per-case judge attribution = the judge with the most hearings on that case
+(placeholder/clerk entries excluded). Rearrest is computed by cross-case
+defendant-name match within the rearrest window.
 
 ### Offline NY OCA pipeline (real per-judge pretrial data)
 

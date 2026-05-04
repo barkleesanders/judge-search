@@ -695,7 +695,7 @@ async function handleStatus(env: Env): Promise<Response> {
 		"new-york":
 			"live (NY OCA CSV processor from R2 + CourtListener + NYC arrests)",
 		"san-francisco":
-			"hybrid (judges curated · DataSF stats daily · protective merge)",
+			"hybrid (judges from jamiequint/sf_criminal_court HF parquet — uploaded via scrapers/fetch-sf-hf.mjs · DataSF stats daily · protective merge)",
 		texas:
 			"hybrid (judges curated · Houston OpenData stats daily · protective merge)",
 	};
@@ -2021,10 +2021,12 @@ async function scrapeNewYork(_cityName: string): Promise<{
 	};
 }
 
-// ── San Francisco: city-level DA stats refresh (judge-level is manually curated) ──
-// Judge data comes from Stop Crime Action report cards + curated DataSF joins
-// (no per-judge Socrata feed exists for SF). This just keeps city-wide DA
-// resolution volume fresh so the page always shows a recent timestamp.
+// ── San Francisco: city-level DA stats refresh (judge-level uploaded offline) ──
+// Per-judge data is built offline from the jamiequint/sf_criminal_court HF
+// dataset (SF Superior Court docket scrape + DA feeds + 10.500-released
+// disposition spreadsheet) via scrapers/fetch-sf-hf.mjs and POSTed to
+// /api/upload. This keeps the city-wide DA resolution volume fresh on the
+// daily cron so the page always shows a recent timestamp.
 async function scrapeSanFranciscoStats(): Promise<{
 	source: string;
 	city_stats?: CityStats;
@@ -2034,13 +2036,13 @@ async function scrapeSanFranciscoStats(): Promise<{
 	);
 	return {
 		source:
-			"Stop Crime Action Judge Report Cards (per-judge) + DataSF DA Case Resolutions (city-wide refresh)",
+			"jamiequint/sf_criminal_court (HF) — per-judge dispositions, FTAs, revocations · CC-BY-NC-4.0 · DataSF DA Case Resolutions (city-wide refresh)",
 		city_stats: total
 			? {
 					annual_arrests: total,
 					label: "DA case resolutions on record",
 					source: "data.sfgov.org · DA Case Resolutions (ynfy-z5kt)",
-					note: "Per-judge SF data is curated from Stop Crime Action report cards. DataSF total updates daily.",
+					note: "Per-judge SF data: jamiequint/sf_criminal_court HF dataset (CC-BY-NC-4.0), built from SF Superior Court docket scrape + DA feeds + SFSC charge-disposition spreadsheet released under California Rules of Court rule 10.500. DataSF city-wide total updates daily.",
 				}
 			: undefined,
 	};
@@ -2442,8 +2444,9 @@ footer a{color:var(--gold)}
 
 <div style="padding:18px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
 <div style="font-size:.75rem;color:var(--gold);font-family:var(--mono);letter-spacing:.05em;margin-bottom:6px">SAN FRANCISCO · SF COUNTY</div>
-<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge DA case resolutions</strong> — 12K+ case outcomes from the SF District Attorney.</p>
-<p style="color:var(--t3);font-size:.75rem;margin:0">Source: <a href="https://data.sfgov.org/Public-Safety/District-Attorney-Actions-Taken-on-Arrests-Presented/czsm-3ei3" target="_blank" style="color:var(--gold)">DataSF</a> (Socrata API) + <a href="https://www.courtlistener.com" target="_blank" style="color:var(--gold)">CourtListener</a> judicial bios</p>
+<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge dispositions, FTAs, revocations</strong> — built from the SF Superior Court docket scrape, DA open-data feeds, and the SFSC charge-disposition spreadsheet released under California Rules of Court rule 10.500. Judge attribution from <code style="font-family:var(--mono)">judicial_assignments</code> + <code style="font-family:var(--mono)">calendar_with_judicial_assignments</code> joined to <code style="font-family:var(--mono)">register_of_actions</code>.</p>
+<p style="color:var(--t3);font-size:.75rem;margin:0 0 6px 0">Sources: <a href="https://huggingface.co/datasets/jamiequint/sf_criminal_court" target="_blank" style="color:var(--gold)">jamiequint/sf_criminal_court</a> on Hugging Face (<a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" style="color:var(--gold)">CC-BY-NC-4.0</a>) + <a href="https://data.sfgov.org/Public-Safety/District-Attorney-Actions-Taken-on-Arrests-Presented/czsm-3ei3" target="_blank" style="color:var(--gold)">DataSF</a> city-wide totals + <a href="https://www.courtlistener.com" target="_blank" style="color:var(--gold)">CourtListener</a> judicial bios</p>
+<p style="color:var(--t3);font-size:.7rem;margin:0;font-style:italic">Non-commercial use only — attribution: dataset by Jamie Quint.</p>
 </div>
 
 <div style="padding:18px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
