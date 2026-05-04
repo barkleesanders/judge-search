@@ -153,6 +153,13 @@ judge_courts AS (
 	SELECT judge_canonical_name AS judge,
 		ARG_MAX(department_label, COALESCE(effective_start, '')) AS court_label,
 		ARG_MAX(designation, COALESCE(effective_start, '')) AS latest_designation,
+		ARG_MAX(
+			CASE
+				WHEN LOWER(COALESCE(designation, '')) LIKE '%master calendar%'
+					OR LOWER(COALESCE(designation, '')) LIKE '%arraignment%'
+				THEN designation END,
+			COALESCE(effective_start, '')
+		) AS latest_calendar_designation,
 		BOOL_OR(
 			LOWER(COALESCE(designation, '')) LIKE '%master calendar%'
 			OR LOWER(COALESCE(designation, '')) LIKE '%arraignment%'
@@ -166,6 +173,7 @@ SELECT
 	cj.judge AS name,
 	COALESCE(jc.court_label, 'San Francisco Superior Court') AS court,
 	COALESCE(jc.latest_designation, '') AS designation,
+	COALESCE(jc.latest_calendar_designation, '') AS calendar_designation,
 	COALESCE(jc.ever_calendar_role, FALSE) AS calendar_role,
 	COUNT(DISTINCT cj.case_number) AS total_cases,
 	COUNT(DISTINCT f.case_number) AS fta_count,
@@ -176,7 +184,8 @@ LEFT JOIN case_fta f USING (case_number)
 LEFT JOIN case_revoc r USING (case_number)
 LEFT JOIN case_rearrest ra USING (case_number)
 LEFT JOIN judge_courts jc ON cj.judge = jc.judge
-GROUP BY cj.judge, jc.court_label, jc.latest_designation, jc.ever_calendar_role
+GROUP BY cj.judge, jc.court_label, jc.latest_designation,
+	jc.latest_calendar_designation, jc.ever_calendar_role
 HAVING COUNT(DISTINCT cj.case_number) >= ${opts.minCases}
 ORDER BY total_cases DESC;
 `;
@@ -221,15 +230,21 @@ async function main() {
 		// Calendar / arraignment judges see every defendant who passes through
 		// the master-calendar courtroom — their case totals are 5–10× a trial
 		// judge's. Auto-tag them so the UI can flag the apples-to-oranges gap.
-		const designation = String(r.designation || "").trim();
-		const isCalendar =
+		// IMPORTANT: a judge's *current* assignment may not be calendar duty,
+		// but their case-volume in this dataset accumulated under it. Prefer
+		// the most recent CALENDAR designation when one exists, so the badge
+		// fires for judges like Brian J. Stretch (now Long Prelim Hearings,
+		// but accumulated 5,707 cases under Misdemeanor Master Calendar).
+		const calendarDesignation = String(r.calendar_designation || "").trim();
+		const latestDesignation = String(r.designation || "").trim();
+		const everCalendar =
 			r.calendar_role === true ||
 			r.calendar_role === "true" ||
 			r.calendar_role === 1 ||
-			/master calendar|arraignment/i.test(designation);
-		const positionType = isCalendar
-			? designation || "Master Calendar / Arraignment"
-			: designation || undefined;
+			calendarDesignation.length > 0;
+		const positionType = everCalendar
+			? calendarDesignation || "Master Calendar / Arraignment"
+			: latestDesignation || undefined;
 		return {
 			id: judgeId(r.name),
 			name: `Judge ${r.name.replace(/^Judge\s+/i, "").trim()}`,
