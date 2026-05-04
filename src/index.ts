@@ -2734,6 +2734,13 @@ function render(d){
     h+='<div class="bcard-name">'+esc(j.name)+'</div>';
     h+='<div class="bcard-court">'+esc(j.court)+'</div>';
     h+='<div class="bcard-loc">'+esc(j.city)+', '+esc(j.state)+'</div>';
+    // Calendar / arraignment judges see EVERY defendant briefly — their case
+    // counts can be 5–10× a trial judge's. Flag the role so visitors don't
+    // read raw volume as "this judge handles more cases" when really it's a
+    // structural difference in courtroom assignment.
+    if(j.position_type&&/master calendar|arraignment/i.test(j.position_type)){
+      h+='<div title="Master-calendar judges see every defendant pass through arraignment — case counts are not directly comparable to trial-judge counts." style="display:inline-block;margin-top:6px;padding:2px 8px;background:rgba(232,160,64,.12);border:1px solid rgba(232,160,64,.4);border-radius:10px;font-size:.65rem;font-family:var(--mono);letter-spacing:.04em;color:var(--orange,#e8a040)">⚖︎ '+esc(j.position_type)+'</div>';
+    }
     h+='</div>';
     // Prominent rearrest % for cities with real rearrest data
     if(has&&measuresRearrest){

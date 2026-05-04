@@ -95,6 +95,37 @@ Per-case judge attribution = the judge with the most hearings on that case
 (placeholder/clerk entries excluded). Rearrest is computed by cross-case
 defendant-name match within the rearrest window.
 
+Calendar / arraignment judges (those with `Master Calendar` or `Arraignment`
+in their assignment designation) are auto-tagged via `position_type` so the
+UI can flag them. These judges see every defendant at intake — their case
+counts are 5–10× a trial judge's by structural design, not by output.
+
+#### Weekly auto-refresh on Mac mini (launchd + Telegram alerts)
+
+A launchd job runs the scraper weekly and pings Telegram if it fails or if
+the case count drops significantly (silent-failure protection — the worker's
+protective merge would otherwise mask a broken upstream).
+
+One-time setup:
+```bash
+# 1. Populate credentials
+mkdir -p ~/.config/judgesearch
+cp scrapers/credentials-template.txt ~/.config/judgesearch/credentials.env
+chmod 600 ~/.config/judgesearch/credentials.env
+$EDITOR ~/.config/judgesearch/credentials.env   # fill in UPLOAD_SECRET + Telegram
+
+# 2. Load the launchd job (Sundays 06:30 local)
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.barklee.judgesearch-sf-watcher.plist
+
+# 3. (Optional) trigger immediately to verify
+launchctl kickstart -k gui/$(id -u)/com.barklee.judgesearch-sf-watcher
+tail -f ~/Library/Logs/judgesearch-sf-watcher.out.log
+```
+
+Per the LLM-vs-Shell rule this is launchd, not openclaw cron — the job is
+pure shell, so paying for agent tokens would be waste. Telegram alerting
+follows the existing `~/tools/cookies/lib/notify.sh` pattern.
+
 ### Offline NY OCA pipeline (real per-judge pretrial data)
 
 NY State publishes statutorily-required per-judge pretrial release CSVs

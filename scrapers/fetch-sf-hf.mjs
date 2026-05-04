@@ -151,7 +151,12 @@ case_rearrest AS (
 ),
 judge_courts AS (
 	SELECT judge_canonical_name AS judge,
-		ARG_MAX(department_label, COALESCE(effective_start, '')) AS court_label
+		ARG_MAX(department_label, COALESCE(effective_start, '')) AS court_label,
+		ARG_MAX(designation, COALESCE(effective_start, '')) AS latest_designation,
+		BOOL_OR(
+			LOWER(COALESCE(designation, '')) LIKE '%master calendar%'
+			OR LOWER(COALESCE(designation, '')) LIKE '%arraignment%'
+		) AS ever_calendar_role
 	FROM read_parquet(${ja})
 	WHERE judge_canonical_name IS NOT NULL
 		AND COALESCE(is_placeholder_judge, 0) = 0
@@ -160,6 +165,8 @@ judge_courts AS (
 SELECT
 	cj.judge AS name,
 	COALESCE(jc.court_label, 'San Francisco Superior Court') AS court,
+	COALESCE(jc.latest_designation, '') AS designation,
+	COALESCE(jc.ever_calendar_role, FALSE) AS calendar_role,
 	COUNT(DISTINCT cj.case_number) AS total_cases,
 	COUNT(DISTINCT f.case_number) AS fta_count,
 	COUNT(DISTINCT r.case_number) AS revocation_count,
@@ -169,7 +176,7 @@ LEFT JOIN case_fta f USING (case_number)
 LEFT JOIN case_revoc r USING (case_number)
 LEFT JOIN case_rearrest ra USING (case_number)
 LEFT JOIN judge_courts jc ON cj.judge = jc.judge
-GROUP BY cj.judge, jc.court_label
+GROUP BY cj.judge, jc.court_label, jc.latest_designation, jc.ever_calendar_role
 HAVING COUNT(DISTINCT cj.case_number) >= ${opts.minCases}
 ORDER BY total_cases DESC;
 `;
@@ -210,22 +217,34 @@ async function main() {
 		process.exit(1);
 	}
 
-	const judges = rows.map((r) => ({
-		id: judgeId(r.name),
-		name: r.name.replace(/^Judge\s+/i, "").trim(),
-		city: "San Francisco",
-		state: "California",
-		court: r.court || "San Francisco Superior Court",
-		total_cases: Number(r.total_cases) || 0,
-		fta_count: Number(r.fta_count) || 0,
-		rearrest_count: Number(r.rearrest_count) || 0,
-		revocation_count: Number(r.revocation_count) || 0,
-		source:
-			"jamiequint/sf_criminal_court (HF) — SF Superior Court docket scrape + 10.500 release · CC-BY-NC-4.0",
-	}));
-
-	// Restore "Judge " prefix for display consistency with NY/etc.
-	for (const j of judges) j.name = `Judge ${j.name}`;
+	const judges = rows.map((r) => {
+		// Calendar / arraignment judges see every defendant who passes through
+		// the master-calendar courtroom — their case totals are 5–10× a trial
+		// judge's. Auto-tag them so the UI can flag the apples-to-oranges gap.
+		const designation = String(r.designation || "").trim();
+		const isCalendar =
+			r.calendar_role === true ||
+			r.calendar_role === "true" ||
+			r.calendar_role === 1 ||
+			/master calendar|arraignment/i.test(designation);
+		const positionType = isCalendar
+			? designation || "Master Calendar / Arraignment"
+			: designation || undefined;
+		return {
+			id: judgeId(r.name),
+			name: `Judge ${r.name.replace(/^Judge\s+/i, "").trim()}`,
+			city: "San Francisco",
+			state: "California",
+			court: r.court || "San Francisco Superior Court",
+			total_cases: Number(r.total_cases) || 0,
+			fta_count: Number(r.fta_count) || 0,
+			rearrest_count: Number(r.rearrest_count) || 0,
+			revocation_count: Number(r.revocation_count) || 0,
+			position_type: positionType,
+			source:
+				"jamiequint/sf_criminal_court (HF) — SF Superior Court docket scrape + 10.500 release · CC-BY-NC-4.0",
+		};
+	});
 
 	const total_cases = judges.reduce((s, j) => s + j.total_cases, 0);
 	const total_fta = judges.reduce((s, j) => s + j.fta_count, 0);
