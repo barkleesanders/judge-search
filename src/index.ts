@@ -2682,16 +2682,41 @@ function render(d){
     h+='</div>';
   }
 
-  // City-level detention prevention summary — only shown when rearrest data is real
+  // City-level rearrest distribution — shows the SPREAD across judges instead
+  // of a single pooled average. Pooling produces misleading numbers when a
+  // city mixes high-volume calendar/arraignment judges with trial judges
+  // (the calendar judges' lower rates dilute the average). The data already
+  // tells the story; this just renders the data.
   if(measuresRearrest&&cityTotalCases>0){
-    const pct=(cityRearrestRate*100).toFixed(1);
+    // Per-judge rearrest rates, sorted ascending
+    const rates=live.map(j=>j.rearrest_count/j.total_cases).sort((a,b)=>a-b);
+    const median=rates[Math.floor(rates.length/2)];
+    const lo=rates[0];
+    const hi=rates[rates.length-1];
+    const fmt=r=>(r*100).toFixed(0)+'%';
+    const colorFor=r=>r>0.20?'var(--red)':r>0.10?'var(--orange)':'var(--green)';
+
     h+='<div style="background:linear-gradient(135deg,rgba(232,64,64,.08),rgba(200,168,75,.06));border:1px solid var(--b2);border-radius:var(--r);padding:20px 22px;margin-bottom:24px">';
-    h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:8px">THE DETENTION-vs-RELEASE TRADE-OFF</div>';
-    h+='<div style="display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:center" class="prev-grid">';
-    h+='<div style="font-family:var(--serif);font-size:3rem;font-weight:800;color:var(--red);line-height:1">'+pct+'%</div>';
-    h+='<div style="color:var(--t2);font-size:.9rem;line-height:1.55">of defendants released by these judges were <strong style="color:var(--t)">arrested again</strong> while their original case was still open. That is <strong style="color:var(--t)">'+cityTotalRearrests.toLocaleString()+' new crimes</strong> out of '+cityTotalCases.toLocaleString()+' release decisions — crimes that would not have occurred if those defendants had been detained until trial.</div>';
-    h+='</div>';
-    h+='<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--b);color:var(--t3);font-size:.75rem;font-style:italic">Numbers reflect what actually happened in the public record. They do not account for wrongful arrests, ability to pay bail, or the cost of detention. Judges make release decisions one case at a time based on individual circumstances.</div>';
+    h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:10px">REARREST RATES — JUDGE BY JUDGE</div>';
+    h+='<div style="color:var(--t);font-size:1rem;line-height:1.55;margin-bottom:14px">For the typical '+esc(d.city)+' judge on this list, <strong style="color:'+colorFor(median)+'">'+fmt(median)+'</strong> of the people they released were arrested again before their case was over. The judge with the lowest rate: <strong>'+fmt(lo)+'</strong>. The judge with the highest rate: <strong style="color:'+colorFor(hi)+'">'+fmt(hi)+'</strong>.</div>';
+
+    // Sparkline: one dot per judge, x-position = rearrest rate. Lets the reader
+    // SEE the spread instead of trusting a single average. Width responsive.
+    const W=600,H=46,PAD=10;
+    const xMax=Math.max(hi,0.01);
+    let s='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block;margin:0 0 6px 0" role="img" aria-label="Per-judge rearrest rate distribution. Each dot is one judge.">';
+    s+='<line x1="'+PAD+'" y1="'+(H/2)+'" x2="'+(W-PAD)+'" y2="'+(H/2)+'" stroke="var(--b)" stroke-width="1"/>';
+    for(const r of rates){
+      const x=PAD+(W-2*PAD)*(r/xMax);
+      s+='<circle cx="'+x.toFixed(1)+'" cy="'+(H/2)+'" r="5" fill="'+colorFor(r)+'" fill-opacity=".75"><title>'+fmt(r)+' rearrest rate</title></circle>';
+    }
+    s+='</svg>';
+    h+=s;
+    h+='<div style="display:flex;justify-content:space-between;color:var(--t3);font-size:.7rem;font-family:var(--mono);margin-bottom:14px"><span>'+fmt(lo)+'</span><span>'+fmt(hi)+'</span></div>';
+
+    h+='<div style="color:var(--t2);font-size:.85rem;line-height:1.55">Each dot is one judge. <strong style="color:var(--green)">Green</strong> = the judge’s released defendants get arrested again less often. <strong style="color:var(--red)">Red</strong> = more often. The point of this page: the dots are not all in the same place — which judge you get matters.</div>';
+
+    h+='<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--b);color:var(--t3);font-size:.75rem;font-style:italic">“Arrested again” means the same person was charged with a new crime while their first case was still open. Numbers come straight from public court records. They don’t adjust for the kinds of cases each judge sees — a judge handling serious felonies will naturally have different numbers than a judge handling traffic tickets.</div>';
     h+='</div>';
   }
   h+='<div class="cards">';
