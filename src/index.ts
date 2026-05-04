@@ -2682,42 +2682,66 @@ function render(d){
     h+='</div>';
   }
 
-  // City-level rearrest distribution — shows the SPREAD across judges instead
-  // of a single pooled average. Pooling produces misleading numbers when a
-  // city mixes high-volume calendar/arraignment judges with trial judges
-  // (the calendar judges' lower rates dilute the average). The data already
-  // tells the story; this just renders the data.
+  // Three-way contrast block — concrete frequency framing ("21 out of 100"),
+  // named judges as anchors, proportional fill bars on a 0-100% scale so the
+  // reader can SEE that 1% and 39% are not close to each other.
+  // Eligibility: only judges with ≥100 cases get featured as the lowest/highest
+  // exemplar — small-sample outliers (a 0% from 25 cases) aren't representative.
   if(measuresRearrest&&cityTotalCases>0){
-    // Per-judge rearrest rates, sorted ascending
-    const rates=live.map(j=>j.rearrest_count/j.total_cases).sort((a,b)=>a-b);
-    const median=rates[Math.floor(rates.length/2)];
-    const lo=rates[0];
-    const hi=rates[rates.length-1];
-    const fmt=r=>(r*100).toFixed(0)+'%';
-    const colorFor=r=>r>0.20?'var(--red)':r>0.10?'var(--orange)':'var(--green)';
+    const eligible=live.filter(j=>j.total_cases>=100);
+    if(eligible.length>=3){
+      const ranked=eligible.slice().sort((a,b)=>(a.rearrest_count/a.total_cases)-(b.rearrest_count/b.total_cases));
+      const lowJ=ranked[0];
+      const highJ=ranked[ranked.length-1];
+      const lowRate=lowJ.rearrest_count/lowJ.total_cases;
+      const highRate=highJ.rearrest_count/highJ.total_cases;
+      const eligTotalCases=eligible.reduce((s,j)=>s+j.total_cases,0);
+      const eligTotalRearr=eligible.reduce((s,j)=>s+j.rearrest_count,0);
+      const avgRate=eligTotalRearr/eligTotalCases;
 
-    h+='<div style="background:linear-gradient(135deg,rgba(232,64,64,.08),rgba(200,168,75,.06));border:1px solid var(--b2);border-radius:var(--r);padding:20px 22px;margin-bottom:24px">';
-    h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:10px">REARREST RATES — JUDGE BY JUDGE</div>';
-    h+='<div style="color:var(--t);font-size:1rem;line-height:1.55;margin-bottom:14px">For the typical '+esc(d.city)+' judge on this list, <strong style="color:'+colorFor(median)+'">'+fmt(median)+'</strong> of the people they released were arrested again before their case was over. The judge with the lowest rate: <strong>'+fmt(lo)+'</strong>. The judge with the highest rate: <strong style="color:'+colorFor(hi)+'">'+fmt(hi)+'</strong>.</div>';
+      // "X out of every 100" framing — concrete and doesn't require fractional reasoning
+      const freq=r=>{
+        const n=Math.round(r*100);
+        if(n<=0)return'fewer than 1 out of every 100';
+        if(n===1)return'about 1 out of every 100';
+        return'about '+n+' out of every 100';
+      };
+      const pct=r=>(r<0.05?(r*100).toFixed(1):Math.round(r*100))+'%';
+      const colorFor=r=>r>0.25?'var(--red)':r>0.12?'var(--orange)':'var(--green)';
 
-    // Sparkline: one dot per judge, x-position = rearrest rate. Lets the reader
-    // SEE the spread instead of trusting a single average. Width responsive.
-    const W=600,H=46,PAD=10;
-    const xMax=Math.max(hi,0.01);
-    let s='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block;margin:0 0 6px 0" role="img" aria-label="Per-judge rearrest rate distribution. Each dot is one judge.">';
-    s+='<line x1="'+PAD+'" y1="'+(H/2)+'" x2="'+(W-PAD)+'" y2="'+(H/2)+'" stroke="var(--b)" stroke-width="1"/>';
-    for(const r of rates){
-      const x=PAD+(W-2*PAD)*(r/xMax);
-      s+='<circle cx="'+x.toFixed(1)+'" cy="'+(H/2)+'" r="5" fill="'+colorFor(r)+'" fill-opacity=".75"><title>'+fmt(r)+' rearrest rate</title></circle>';
+      // Single horizontal bar — width = rate * 100% of container. 0-100% scale
+      // is honest: a 1% bar SHOULD look tiny next to a 39% bar.
+      const bar=(label,sub,judge,rate)=>{
+        const c=colorFor(rate);
+        return ''
+          +'<div style="margin-bottom:18px">'
+          +  '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:12px;flex-wrap:wrap">'
+          +    '<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.06em;text-transform:uppercase">'+label+'</div>'
+          +    (judge?'<div style="color:var(--t);font-size:.9rem;font-weight:600">'+esc(judge.name)+' <span style="color:var(--t3);font-weight:400;font-size:.8rem">— '+esc(judge.court||'')+'</span></div>':'<div style="color:var(--t2);font-size:.85rem">'+sub+'</div>')
+          +  '</div>'
+          +  '<div style="background:rgba(255,255,255,.04);border:1px solid var(--b);border-radius:6px;height:22px;overflow:hidden;position:relative">'
+          +    '<div style="height:100%;width:'+(rate*100).toFixed(2)+'%;background:'+c+';min-width:3px;transition:width .3s ease"></div>'
+          +  '</div>'
+          +  '<div style="display:flex;justify-content:space-between;margin-top:6px;color:var(--t2);font-size:.85rem">'
+          +    '<span><strong style="color:var(--t)">'+freq(rate)+'</strong></span>'
+          +    '<span style="color:'+c+';font-family:var(--mono);font-weight:700">'+pct(rate)+'</span>'
+          +  '</div>'
+          +'</div>';
+      };
+
+      h+='<div style="background:linear-gradient(135deg,rgba(232,64,64,.08),rgba(200,168,75,.06));border:1px solid var(--b2);border-radius:var(--r);padding:22px 22px 18px;margin-bottom:24px">';
+      h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:6px">RELEASED BEFORE TRIAL — WHAT HAPPENED NEXT</div>';
+      h+='<div style="color:var(--t);font-size:1rem;line-height:1.5;margin-bottom:18px">In '+esc(d.city)+', when one of these '+eligible.length+' judges sent a defendant home to wait for trial, here is how often that person was charged with a new crime <em>before</em> the case ended. Three judges, side by side:</div>';
+
+      h+=bar('Lowest rate',null,lowJ,lowRate);
+      h+=bar('Average across all '+eligible.length+' judges','—',null,avgRate);
+      h+=bar('Highest rate',null,highJ,highRate);
+
+      h+='<div style="color:var(--t);font-size:.95rem;line-height:1.5;margin:6px 0 0;padding-top:14px;border-top:1px solid var(--b)">Same city. Same kind of crime, sometimes. <strong>Different judge — very different outcome.</strong> Scroll down to see where every judge in '+esc(d.city)+' falls.</div>';
+
+      h+='<div style="margin-top:12px;color:var(--t3);font-size:.78rem;line-height:1.55;font-style:italic">What &ldquo;arrested again&rdquo; means: the same person was charged with a new crime while their original case was still open. Numbers come straight from public court records and are not adjusted for the type of case — a judge who handles violent felonies will naturally see different numbers than one who handles traffic tickets. Judges with fewer than 100 cases in the dataset are not used as the high/low examples (small samples are noisy).</div>';
+      h+='</div>';
     }
-    s+='</svg>';
-    h+=s;
-    h+='<div style="display:flex;justify-content:space-between;color:var(--t3);font-size:.7rem;font-family:var(--mono);margin-bottom:14px"><span>'+fmt(lo)+'</span><span>'+fmt(hi)+'</span></div>';
-
-    h+='<div style="color:var(--t2);font-size:.85rem;line-height:1.55">Each dot is one judge. <strong style="color:var(--green)">Green</strong> = the judge’s released defendants get arrested again less often. <strong style="color:var(--red)">Red</strong> = more often. The point of this page: the dots are not all in the same place — which judge you get matters.</div>';
-
-    h+='<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--b);color:var(--t3);font-size:.75rem;font-style:italic">“Arrested again” means the same person was charged with a new crime while their first case was still open. Numbers come straight from public court records. They don’t adjust for the kinds of cases each judge sees — a judge handling serious felonies will naturally have different numbers than a judge handling traffic tickets.</div>';
-    h+='</div>';
   }
   h+='<div class="cards">';
 
