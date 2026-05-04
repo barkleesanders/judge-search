@@ -2403,8 +2403,38 @@ footer a{color:var(--gold)}
 <div style="padding:24px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r)">
 <div style="font-family:var(--serif);font-size:1.8rem;font-weight:800;color:var(--gold);margin-bottom:6px">03</div>
 <h3 style="font-family:var(--serif);font-size:1rem;margin-bottom:8px">How judges are compared</h3>
-<p style="color:var(--t2);font-size:.88rem">Each judge's outcomes are compared to every other judge in the same city. A red bar means that judge's rate is higher than average for a bad outcome. Green means lower. Cases are grouped by the judge named on the court record — no sampling, no modeling.</p>
+<p style="color:var(--t2);font-size:.88rem">Two ranking views per city: <strong style="color:var(--t)">By rate</strong> (worst decisions per defendant) and <strong style="color:var(--t)">By total rearrests</strong> (most new crimes overall). They answer different questions and they often surface different judges. <a href="#rank-method" style="color:var(--gold)">How that works →</a></p>
 </div>
+</div>
+
+<div style="padding:28px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r);margin-bottom:16px" id="rank-method">
+<h3 style="font-family:var(--serif);font-size:1.05rem;margin-bottom:14px;color:var(--gold)">How rankings work — and what each one really tells you</h3>
+
+<p style="color:var(--t);font-size:.95rem;line-height:1.65;margin:0 0 12px">Every city page has two ranking lenses. They answer different questions. <strong>Look at both before deciding what a judge’s record actually means.</strong></p>
+
+<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:18px" class="how-grid">
+  <div style="padding:18px;background:rgba(0,0,0,.18);border:1px solid var(--b);border-radius:var(--r)">
+    <div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.06em;margin-bottom:8px">BY RATE — DEFAULT</div>
+    <p style="color:var(--t2);font-size:.88rem;line-height:1.6;margin:0 0 10px">Out of every 100 defendants this judge released, how many were arrested again before their case ended? This is the <strong style="color:var(--t)">quality of decision-making</strong> view — the part of the job the judge actually controls.</p>
+    <p style="color:var(--t3);font-size:.8rem;margin:0">Best for judging the judge. A high rate means: when this judge made a release call, it went sideways more often than average.</p>
+  </div>
+  <div style="padding:18px;background:rgba(0,0,0,.18);border:1px solid var(--b);border-radius:var(--r)">
+    <div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.06em;margin-bottom:8px">BY TOTAL REARRESTS</div>
+    <p style="color:var(--t2);font-size:.88rem;line-height:1.6;margin:0 0 10px">In raw count, how many people this judge released ended up arrested again? A 25%-rate judge in a 2,000-case courtroom causes <em>more total new crimes</em> than a 35%-rate judge in a 200-case courtroom.</p>
+    <p style="color:var(--t3);font-size:.8rem;margin:0">Best for understanding real-world impact. Busy courtrooms naturally rise — that is the point. The <em>volume</em> of harm matters too.</p>
+  </div>
+</div>
+
+<div style="padding:18px;background:rgba(232,64,64,.06);border:1px solid var(--b2);border-radius:var(--r);margin-bottom:14px">
+  <div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.06em;margin-bottom:6px">⚖ THE STRONGEST SIGNAL — JUDGES WHO TOP BOTH LISTS</div>
+  <p style="color:var(--t);font-size:.92rem;line-height:1.6;margin:0">A judge who sits in the worst quartile by rate <em>and</em> the worst quartile by total rearrests has nowhere to hide. Bad decisions, repeated at scale. <strong>That is the signal worth paying attention to.</strong> A judge who tops only the rate list might be a small-sample anomaly. A judge who tops only the volume list might just be assigned to a busy arraignment court. Topping both means it’s neither excuse.</p>
+</div>
+
+<p style="color:var(--t2);font-size:.88rem;line-height:1.65;margin:0 0 12px"><strong style="color:var(--t)">Why we don’t use the “Missed Court” rate to rank.</strong> A bench warrant for a missed hearing is administrative — it does not measure new harm. Rearrests do. Missed-court counts still appear on each judge’s card, but they are not in the ranking.</p>
+
+<p style="color:var(--t2);font-size:.88rem;line-height:1.65;margin:0 0 12px"><strong style="color:var(--t)">Small samples are pushed down.</strong> A judge with 25 cases at a 60% rearrest rate is not the same kind of evidence as a judge with 1,500 cases at 30%. The <em>By rate</em> view requires a judge to have at least 100 cases in the dataset to be ranked at the top — below that, the judge still appears, just lower.</p>
+
+<p style="color:var(--t2);font-size:.88rem;line-height:1.65;margin:0"><strong style="color:var(--t)">When a city only supports one view.</strong> Not every court system publishes the same fields. Cities where the source data does not include true rearrests-while-pending (we use the literal word <em>rearrest</em> on the source feed, not a proxy) cannot be ranked the same way — those cities show what their data actually supports, and the page calls that out. See the per-city note in the <a href="#sources" style="color:var(--gold)">Data Sources</a> section for exactly what each city publishes.</p>
 </div>
 <div style="padding:28px;background:var(--s2);border:1px solid var(--b);border-radius:var(--r);margin-bottom:16px">
 <h3 style="font-family:var(--serif);font-size:1rem;margin-bottom:10px;color:var(--gold)">What JudgeSearch is not</h3>
@@ -2798,7 +2828,23 @@ function render(d){
     h+='<button data-sort="rate" onclick="setSort(this.dataset.sort)" style="'+tabStyle+(isRate?';'+onStyle:'')+'"><div style="font-weight:700;color:'+(isRate?'var(--gold)':'var(--t)')+'">By rate</div><div style="color:var(--t3);font-size:.7rem;font-family:var(--sans);text-transform:none;letter-spacing:0;font-weight:400;margin-top:2px">Worst per defendant — small judges count</div></button>';
     h+='<button data-sort="volume" onclick="setSort(this.dataset.sort)" style="'+tabStyle+(!isRate?';'+onStyle:'')+'"><div style="font-weight:700;color:'+(!isRate?'var(--gold)':'var(--t)')+'">By total rearrests</div><div style="color:var(--t3);font-size:.7rem;font-family:var(--sans);text-transform:none;letter-spacing:0;font-weight:400;margin-top:2px">Most new crimes overall — busy courts rise</div></button>';
     h+='</div>';
-    h+='<div style="color:var(--t3);font-size:.78rem;line-height:1.5">'+(isRate?'Showing the judges who release the highest <strong style="color:var(--t2)">share</strong> of defendants who get arrested again. Judges with fewer than '+MIN_CASES_FOR_RATE+' cases are pushed below — small samples are noisy.':'Showing the judges who released the most defendants who got arrested again, by raw count. Bigger courtrooms naturally rise — that is the point of this view.')+'</div>';
+    h+='<div style="color:var(--t3);font-size:.78rem;line-height:1.5">'+(isRate?'Showing the judges who release the highest <strong style="color:var(--t2)">share</strong> of defendants who get arrested again. Judges with fewer than '+MIN_CASES_FOR_RATE+' cases are pushed below — small samples are noisy. <a href="#rank-method" style="color:var(--gold)">How rankings work →</a>':'Showing the judges who released the most defendants who got arrested again, by raw count. Bigger courtrooms naturally rise — that is the point of this view. <a href="#rank-method" style="color:var(--gold)">How rankings work →</a>')+'</div>';
+    h+='</div>';
+  } else if(judgesSorted.length>1&&cityTotalCases>0) {
+    // Per-city data-quality callout: explain why this city does NOT show
+    // both ranking views. The site is honest about what it can and can't do.
+    const ftaLbl=esc(lbl.fta_bar||lbl.fta||'Missed Court');
+    const reaLbl=esc(lbl.rearrest_bar||lbl.rearrest||'Outcome');
+    h+='<div style="margin-bottom:14px;padding:14px 16px;background:rgba(200,168,75,.06);border:1px solid var(--b2);border-radius:var(--r)">';
+    h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.06em;margin-bottom:6px">RANKING NOTE — '+esc(d.city.toUpperCase())+'</div>';
+    h+='<p style="color:var(--t2);font-size:.85rem;line-height:1.55;margin:0">This city does not publish a true <em>rearrest-while-pending</em> field on its public data feed, so the site can’t show the two-view ranking other cities have. What you see below is sorted using the closest signal this city <em>does</em> publish (<strong style="color:var(--t)">'+reaLbl+'</strong> + <strong style="color:var(--t)">'+ftaLbl+'</strong>). <a href="#rank-method" style="color:var(--gold)">How rankings work →</a></p>';
+    h+='</div>';
+  } else if(cityTotalCases===0&&d.city_stats) {
+    // Cities with no per-judge case data at all (LA / Seattle / NY state) —
+    // we publish CourtListener opinion counts + city-wide arrest totals only.
+    h+='<div style="margin-bottom:14px;padding:14px 16px;background:rgba(232,64,64,.05);border:1px solid var(--b2);border-radius:var(--r)">';
+    h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--red);letter-spacing:.06em;margin-bottom:6px">NO RANKING — '+esc(d.city.toUpperCase())+'</div>';
+    h+='<p style="color:var(--t2);font-size:.85rem;line-height:1.55;margin:0">'+esc(d.city)+'’s court system does not publish judge-level case data via any public API. The judges below are real, sourced from official directories and CourtListener — but per-judge rearrest, missed-court, and revocation rates aren’t computable here. The city-wide arrest total is shown for context only. <a href="#rank-method" style="color:var(--gold)">How rankings work →</a></p>';
     h+='</div>';
   }
 
