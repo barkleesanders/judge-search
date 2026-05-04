@@ -2539,6 +2539,13 @@ function loadCity(el){
   fetchCity(slug);
 }
 
+// Module-level state so the rank-tab buttons can re-render the current city
+// without re-fetching. _sortMode picks which lens the per-judge list is shown
+// through: 'rate' = bad-decisions per defendant; 'volume' = total rearrests
+// (volume × rate, the absolute-harm view).
+let _currentCity=null;
+let _sortMode='rate';
+
 async function fetchCity(slug){
   const area=$('results');
   area.innerHTML='<div class="loading"><div class="spin"></div><p>Loading judges...</p></div>';
@@ -2547,10 +2554,19 @@ async function fetchCity(slug){
   try{
     const res=await fetch('/api/city?slug='+slug);
     if(!res.ok)throw new Error('Data unavailable');
-    render(await res.json());
+    _currentCity=await res.json();
+    render(_currentCity);
   }catch(e){
     area.innerHTML='<div class="empty"><h3>Error</h3><p>'+esc(e.message)+'</p></div>';
   }
+}
+
+function setSort(mode){
+  _sortMode=mode;
+  if(_currentCity)render(_currentCity);
+  // scroll the cards section back into view so the tab feels responsive
+  const r=document.getElementById('results');
+  if(r)r.scrollIntoView({block:'start',behavior:'smooth'});
 }
 
 // National Accountability Index — 50 worst judges in America
@@ -2666,9 +2682,38 @@ function render(d){
   // (vs convictions/transfers)? Only Miami measures true rearrest rate.
   const measuresRearrest=/rearrest/i.test(lbl.rearrest||'')||/rearrest/i.test(lbl.rearrest_bar||'');
 
+  // Two ranking lenses, both honest, both flawed in different ways:
+  //  rate    — rearrests per defendant. Catches a low-volume judge with a
+  //            high rate; a 35%-rate judge with 200 cases ranks above a
+  //            25%-rate judge with 2,000 cases.
+  //  volume  — total rearrests (volume × rate). Catches a high-volume judge
+  //            who lets out a lot of people who reoffend in absolute terms;
+  //            the 25%-rate / 2,000-cases judge ranks above the 35%/200.
+  // Together they cover both halves of "most bad release decisions". A judge
+  // who tops BOTH lists is unambiguously concerning. Judges below MIN_CASES
+  // are excluded from the rate-based ranking only — small-sample noise
+  // shouldn't lead the page; they remain visible at the bottom with a flag.
+  const MIN_CASES_FOR_RATE=100;
+  const sortableMode=measuresRearrest?_sortMode:'rate';
+  const judgesSorted=d.judges.slice().sort((a,b)=>{
+    if(sortableMode==='volume'){
+      const v=b.rearrest_count-a.rearrest_count;
+      if(v)return v;
+      return b.total_cases-a.total_cases;
+    }
+    // 'rate' mode: gate by min-cases first; below the gate gets pushed down
+    const aQ=a.total_cases>=MIN_CASES_FOR_RATE;
+    const bQ=b.total_cases>=MIN_CASES_FOR_RATE;
+    if(aQ!==bQ)return aQ?-1:1;
+    const ar=a.total_cases?a.rearrest_count/a.total_cases:0;
+    const br=b.total_cases?b.rearrest_count/b.total_cases:0;
+    if(ar!==br)return br-ar;
+    return b.total_cases-a.total_cases;
+  });
+
   // Top judges as baseball cards (show first 12)
-  const topJudges=d.judges.slice(0,12);
-  const restJudges=d.judges.slice(12);
+  const topJudges=judgesSorted.slice(0,12);
+  const restJudges=judgesSorted.slice(12);
 
   const area=$('results');
   let h='<h2 style="font-family:var(--serif);font-size:1.3rem;margin-bottom:6px">'+d.judges.length+' Judges &mdash; '+esc(d.city)+', '+esc(d.state)+'</h2>';
@@ -2743,6 +2788,20 @@ function render(d){
       h+='</div>';
     }
   }
+  // Rank lens tabs — only meaningful for cities that measure rearrest
+  if(measuresRearrest&&judgesSorted.length>1){
+    const isRate=sortableMode==='rate';
+    const tabStyle='flex:1;padding:10px 14px;font-family:var(--mono);font-size:.78rem;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--b);background:transparent;color:var(--t2);cursor:pointer;text-align:left;line-height:1.35';
+    const onStyle='background:rgba(200,168,75,.12);border-color:var(--gold);color:var(--gold)';
+    h+='<div style="margin-bottom:14px">';
+    h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">';
+    h+='<button data-sort="rate" onclick="setSort(this.dataset.sort)" style="'+tabStyle+(isRate?';'+onStyle:'')+'"><div style="font-weight:700;color:'+(isRate?'var(--gold)':'var(--t)')+'">By rate</div><div style="color:var(--t3);font-size:.7rem;font-family:var(--sans);text-transform:none;letter-spacing:0;font-weight:400;margin-top:2px">Worst per defendant — small judges count</div></button>';
+    h+='<button data-sort="volume" onclick="setSort(this.dataset.sort)" style="'+tabStyle+(!isRate?';'+onStyle:'')+'"><div style="font-weight:700;color:'+(!isRate?'var(--gold)':'var(--t)')+'">By total rearrests</div><div style="color:var(--t3);font-size:.7rem;font-family:var(--sans);text-transform:none;letter-spacing:0;font-weight:400;margin-top:2px">Most new crimes overall — busy courts rise</div></button>';
+    h+='</div>';
+    h+='<div style="color:var(--t3);font-size:.78rem;line-height:1.5">'+(isRate?'Showing the judges who release the highest <strong style="color:var(--t2)">share</strong> of defendants who get arrested again. Judges with fewer than '+MIN_CASES_FOR_RATE+' cases are pushed below — small samples are noisy.':'Showing the judges who released the most defendants who got arrested again, by raw count. Bigger courtrooms naturally rise — that is the point of this view.')+'</div>';
+    h+='</div>';
+  }
+
   h+='<div class="cards">';
 
   // Judges are already sorted by rate-based danger score on the server,
