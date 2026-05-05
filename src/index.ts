@@ -2750,16 +2750,23 @@ function render(d){
   // Header description matches whichever ranking lens is currently active.
   // No more "Danger Score" — that was the old FTA+rearrest+revoc blend; the
   // current ranking is single-axis (rate OR total rearrests) per the user-
-  // selected tab, with the methodology fully documented at #rank-method.
+  // selected tab. Three states mirror the per-city callout below:
+  //   A: rearrest-measuring + judges with cases → tab-aware copy
+  //   B: per-judge data but not rearrest        → "closest signal" copy
+  //   C: no per-judge data at all              → "bios only, no ranking" copy
   let rankDesc;
-  if(measuresRearrest&&judgesSorted.length>1){
+  let showRibbonLegend=true;
+  if(measuresRearrest&&cityTotalCases>0){
     rankDesc=sortableMode==='volume'
       ? 'Ranked by <strong style="color:var(--t2)">total rearrests</strong> — judges who released the most defendants who later got arrested again, by raw count. Busy courtrooms naturally rise. Switch to <em>By rate</em> above for the per-defendant view.'
       : 'Ranked by <strong style="color:var(--t2)">rearrest rate</strong> — share of released defendants who were arrested again before their case ended. Judges with fewer than '+MIN_CASES_FOR_RATE+' cases drop to the bottom (small samples are noisy). Switch to <em>By total rearrests</em> above for the absolute-harm view.';
-  } else {
+  } else if(cityTotalCases>0){
     rankDesc='Ranked by <strong style="color:var(--t2)">'+esc(lbl.rearrest||'outcome')+'</strong> rate — this city does not publish a true rearrest-while-pending field, so we use the closest signal it does provide.';
+  } else {
+    rankDesc='Listed by name only — '+esc(d.city)+' does not publish per-judge case data on a public API, so no per-judge ranking is possible. See the note below.';
+    showRibbonLegend=false;
   }
-  h+='<p style="color:var(--t3);font-size:.8rem;margin-bottom:16px">'+rankDesc+' <a href="#rank-method" style="color:var(--gold)">How rankings work →</a> <span style="color:var(--red)">Red</span> ribbon = top quarter, <span style="color:var(--orange)">orange</span> = top half, <span style="color:var(--green)">green</span> = bottom half.</p>';
+  h+='<p style="color:var(--t3);font-size:.8rem;margin-bottom:16px">'+rankDesc+' <a href="#rank-method" style="color:var(--gold)">How rankings work →</a>'+(showRibbonLegend?' <span style="color:var(--red)">Red</span> ribbon = top quarter, <span style="color:var(--orange)">orange</span> = top half, <span style="color:var(--green)">green</span> = bottom half.':'')+'</p>';
 
   // City-wide context note (LA/Seattle/NY — where we have real arrest totals but
   // not per-judge data).
