@@ -116,7 +116,22 @@ export default {
 		}
 
 		return new Response(HTML, {
-			headers: { "content-type": "text/html;charset=utf-8" },
+			headers: {
+				"content-type": "text/html;charset=utf-8",
+				// Production baseline (2026-07-06, /ship 4.05b): explicit cache
+				// policy (public judge data; with Workers Cache enabled, hits skip
+				// the Worker) + security headers. CSP allow-list is exactly what
+				// the page loads: Leaflet from unpkg, Google Fonts, CartoDB dark
+				// basemap tiles; inline style/script blocks are part of the
+				// single-file HTML.
+				"cache-control": "public, max-age=300, stale-while-revalidate=3600",
+				"content-security-policy":
+					"default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+				"x-content-type-options": "nosniff",
+				"x-frame-options": "DENY",
+				"referrer-policy": "strict-origin-when-cross-origin",
+				"permissions-policy": "camera=(), microphone=(), geolocation=()",
+			},
 		});
 	},
 
