@@ -2,9 +2,12 @@
 	"name": "judge-search",
 	"version": "1.0.0",
 	"private": true,
+	"type": "module",
 	"scripts": {
 		"dev": "wrangler dev",
-		"deploy": "wrangler deploy"
+		"deploy": "wrangler deploy",
+		"test": "node --test src/*.test.ts",
+		"check": "tsc --noEmit && biome check . && node --test src/*.test.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.11",

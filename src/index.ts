@@ -1,3 +1,11 @@
+import {
+	type AuditableJudge,
+	type AuditReport,
+	auditJudges,
+	dedupeById,
+	isCourtWatchNonJudgeRow,
+} from "./audit.ts";
+
 // ── Types ──
 interface Env {
 	DATA: R2Bucket;
@@ -100,14 +108,28 @@ interface JudgeIndex {
 const CL = "https://www.courtlistener.com/api/rest/v4";
 const CW = "https://courtwatch.us/.netlify/functions";
 
-const CITIES: Record<string, { state: string; searchTerm: string }> = {
+// `label` is the human-readable name. It is separate from the slug because the
+// slug is load-bearing — it is the R2 key (courts/<slug>.json) and the deep-link
+// parameter — so a slug that turned out to be factually wrong is corrected in
+// the label rather than renamed, which would orphan stored data and break every
+// existing link. Where `label` is omitted the slug is title-cased as before.
+const CITIES: Record<
+	string,
+	{ state: string; searchTerm: string; label?: string }
+> = {
 	"san-francisco": { state: "California", searchTerm: "California" },
 	"new-york": { state: "New York", searchTerm: "New York" },
 	chicago: { state: "Illinois", searchTerm: "Illinois" },
 	atlanta: { state: "Georgia", searchTerm: "Georgia" },
-	miami: { state: "Florida", searchTerm: "Florida" },
+	// The CourtWatch feed behind this slug covers four Florida counties and none
+	// of them is Miami-Dade (measured 2026-09-03: Orange 18, Bay 17, Osceola 10,
+	// Monroe 6). The label must stay true as that set changes, so it names the
+	// state and lets each judge's own row carry the county.
+	miami: { state: "Florida", searchTerm: "Florida", label: "Florida" },
 	seattle: { state: "Washington", searchTerm: "Washington" },
-	texas: { state: "Texas", searchTerm: "Texas" },
+	// Harris County, i.e. Houston — the slug is a state name for historical
+	// reasons; only the display label is corrected.
+	texas: { state: "Texas", searchTerm: "Texas", label: "Houston" },
 	"los-angeles": { state: "California", searchTerm: "California" },
 };
 
@@ -434,13 +456,25 @@ async function buildJudgeIndex(env: Env): Promise<JudgeIndex> {
 		}
 	}
 
-	judges.sort((a, b) => sortKey(a.name).localeCompare(sortKey(b.name)));
+	// Ids must be unique across the whole index — it is the deep-link key, so a
+	// collision makes two rows unaddressable apart. Deduping here as well as at
+	// write time means an id collision already sitting in R2 (the live
+	// `cl-14533` case) is corrected on read, without waiting for a reseed.
+	const deduped = dedupeById(judges);
+	if (deduped.identicalDropped)
+		console.log(
+			`[judge-index] collapsed ${deduped.identicalDropped} byte-identical duplicate row(s)`,
+		);
+	for (const c of deduped.conflicts) console.log(`[judge-index] ERROR: ${c}`);
+
+	const out = deduped.rows;
+	out.sort((a, b) => sortKey(a.name).localeCompare(sortKey(b.name)));
 	return {
-		count: judges.length,
+		count: out.length,
 		cities,
 		unreadable,
 		generated_at: new Date().toISOString(),
-		judges,
+		judges: out,
 	};
 }
 
@@ -778,7 +812,15 @@ async function handleSeed(url: URL, env: Env): Promise<Response> {
 	}
 
 	const data = await seedCity(slug, env);
-	if (!data) return json({ error: "Unknown city" }, 404);
+	if (!data)
+		return json(
+			{
+				error: CITIES[slug]
+					? "Refresh produced no publishable data — it failed the integrity audit and there is no known-good data to fall back to. See the [audit] Worker logs."
+					: "Unknown city",
+			},
+			CITIES[slug] ? 409 : 404,
+		);
 	return json({ seeded: slug, judges: data.judges.length });
 }
 
@@ -805,15 +847,22 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 	// Load existing data first — the floor we refuse to fall below
 	const existing = await loadExisting(slug, env);
 
-	const cityName = slug
-		.split("-")
-		.map((w) => w[0].toUpperCase() + w.slice(1))
-		.join(" ");
+	const cityName =
+		conf.label ??
+		slug
+			.split("-")
+			.map((w) => w[0].toUpperCase() + w.slice(1))
+			.join(" ");
 	let judges: JudgeRecord[] = [];
 	let source = "CourtListener (Free Law Project)";
 	let metric_labels: MetricLabels | undefined;
 	let city_stats: CityStats | undefined;
 	let scrapeErr: unknown = null;
+	// Set by scrapers that can report the jurisdiction the feed itself gave for
+	// each row, so the audit can check the court label against it. Typed on
+	// AuditableJudge (not JudgeRecord) so it may only read the fields the audit
+	// contract guarantees.
+	let jurisdictionOf: ((row: AuditableJudge) => string | undefined) | undefined;
 
 	// Dispatch to city-specific scrapers — wrap in try/catch so a failed
 	// scraper never wipes R2 data.
@@ -823,6 +872,13 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 			judges = r.judges;
 			source = r.source;
 			metric_labels = r.metric_labels;
+			if (r.excluded.length)
+				console.log(
+					`[audit] ${slug}: excluded ${r.excluded.length} known non-person row(s): ${r.excluded.join(", ")}`,
+				);
+			// The county as the FEED reported it, looked up by id. Independent of
+			// the court label, which is what makes the comparison a real check.
+			jurisdictionOf = (row) => r.jurisdictions[row.id];
 			await enrichBiosFromCL(judges, "Florida", env.COURTLISTENER_TOKEN);
 		} else if (slug === "chicago") {
 			const r = await scrapeChicago(cityName);
@@ -908,6 +964,40 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 		judges = [];
 	}
 
+	// ── Integrity gate ──
+	// Runs for EVERY city on EVERY seed, whatever the scraper. An id collision
+	// makes two people unaddressable apart, so it is always resolved here; a
+	// collision between rows that DIFFER is reported rather than silently
+	// resolved, because picking a version of a real person's record is a claim.
+	const deduped = dedupeById(judges);
+	if (deduped.identicalDropped)
+		console.log(
+			`[audit] ${slug}: collapsed ${deduped.identicalDropped} byte-identical duplicate row(s)`,
+		);
+	judges = deduped.rows;
+
+	const report = auditJudges(slug, judges, { jurisdictionOf });
+	logAudit(report, deduped.conflicts);
+	// A failed invariant is treated exactly like a failed scrape: fall through to
+	// the protective merge below, which keeps the last known-good data rather
+	// than publishing something we have just proved is wrong.
+	const auditFailed = !report.ok || deduped.conflicts.length > 0;
+	if (auditFailed && !scrapeErr)
+		scrapeErr = new Error("integrity audit failed");
+
+	// COLD START: the protective merge below can only protect data that already
+	// exists. On a first-ever seed there is nothing to fall back to, so without
+	// this the audit would report the violation and then publish it anyway —
+	// the exact silent-publish the gate exists to prevent. Publishing nothing is
+	// the correct outcome: an empty city is visibly missing, a mislabelled one
+	// is not.
+	if (auditFailed && !(existing && existing.total_cases > 0)) {
+		console.log(
+			`[audit] ${slug}: REFUSING to publish — audit failed and there is no known-good data to fall back to`,
+		);
+		return existing;
+	}
+
 	const newTotalCases = judges.reduce((s, j) => s + j.total_cases, 0);
 
 	// PROTECTIVE MERGE: if existing data has more cases, keep it.
@@ -979,6 +1069,26 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 	return cityData;
 }
 
+// Emit an audit report to the Worker log. Always logs a line, including on a
+// clean pass — a gate that only speaks when it fails is indistinguishable from
+// a gate that has stopped running.
+function logAudit(report: AuditReport, conflicts: string[] = []): void {
+	const s = report.stats;
+	console.log(
+		`[audit] ${report.slug}: ${report.ok && !conflicts.length ? "OK" : "FAILED"} ` +
+			`rows=${s.rows} dup_ids=${s.duplicate_ids} dup_name_city=${s.duplicate_name_city} ` +
+			`non_personal=${s.non_personal_names} jurisdiction_checked=${s.jurisdiction_checked}`,
+	);
+	for (const e of report.errors)
+		console.log(`[audit] ${report.slug} ERROR: ${e}`);
+	for (const c of conflicts) console.log(`[audit] ${report.slug} ERROR: ${c}`);
+	for (const w of report.warnings)
+		console.log(`[audit] ${report.slug} WARN: ${w}`);
+	// Unmeasured is its own outcome and is never folded into the pass.
+	for (const u of report.unmeasured)
+		console.log(`[audit] ${report.slug} UNMEASURED: ${u}`);
+}
+
 async function loadExisting(slug: string, env: Env): Promise<CityData | null> {
 	const obj = await env.DATA.get(`courts/${slug}.json`);
 	if (!obj) return null;
@@ -1018,6 +1128,29 @@ async function handleUpload(
 		parsed.is_stale = false;
 	}
 	parsed.last_updated = parsed.last_updated || new Date().toISOString();
+
+	// Same integrity gate as the scraper path — an upload is a seed too, and a
+	// hand-built file is if anything MORE likely to carry a duplicate or a
+	// mislabelled row. Refuse rather than publish something provably wrong; the
+	// response names every violation so the operator can fix and re-upload.
+	if (Array.isArray(parsed.judges)) {
+		const deduped = dedupeById(parsed.judges);
+		parsed.judges = deduped.rows;
+		const report = auditJudges(slug, parsed.judges);
+		logAudit(report, deduped.conflicts);
+		if (!report.ok || deduped.conflicts.length) {
+			return json(
+				{
+					error: "Upload rejected: data-integrity audit failed",
+					errors: [...report.errors, ...deduped.conflicts],
+					warnings: report.warnings,
+					unmeasured: report.unmeasured,
+				},
+				422,
+			);
+		}
+	}
+
 	// Enrich bios from CourtListener so uploaded cities (SF, Texas) match the
 	// same bio coverage as LA/Seattle/NY.
 	if (parsed.judges?.length && parsed.state) {
@@ -1658,19 +1791,44 @@ async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
 // ── SCRAPERS ──
 // ═══════════════════════════════════════════
 
-// ── Miami: CourtWatch.us API (FSS 907.043) ──
+// ── Florida: CourtWatch.us API (FSS 907.043) ──
+//
+// NOT a Miami feed, despite the `miami` slug it is still stored under. Probed
+// live 2026-09-03: all 51 rows carry a `county` and NONE of them is Miami-Dade —
+// Orange 18, Bay 17, Osceola 10, Monroe 6. CourtWatch's own /stats agrees
+// ({"counties":4}). The county set has already grown once (it was Bay-only
+// earlier in 2026), so nothing here may hardcode a county or assume how many
+// there are; the court label is built from each row's own `county` field, the
+// way CourtWatch's own UI does it.
+//
+// The slug stays `miami` on purpose: it is the R2 key (courts/miami.json) and
+// the deep-link parameter, so renaming it would orphan stored data and break
+// every existing /?judge=…&city=miami link. Only the human-readable labels are
+// corrected — see CITIES[].label.
 async function scrapeMiami(cityName: string): Promise<{
 	judges: JudgeRecord[];
 	source: string;
 	metric_labels?: MetricLabels;
+	excluded: string[];
+	/** judge id -> the county string the FEED reported, captured verbatim before
+	 *  it is formatted into a court label. The audit compares the label against
+	 *  this, so the check has an input the label cannot influence. Deriving the
+	 *  expected county back out of the court string instead makes the comparison
+	 *  a tautology that passes even when the label is hardcoded wrong — measured:
+	 *  an injected `court = "Circuit Court, Orange County, FL"` scored a clean
+	 *  pass and published 49 mislabelled judges. */
+	jurisdictions: Record<string, string>;
 }> {
 	const judges: JudgeRecord[] = [];
+	const excluded: string[] = [];
+	const jurisdictions: Record<string, string> = {};
 	try {
 		const res = await fetch(`${CW}/judges`);
 		if (!res.ok) throw new Error("CourtWatch unavailable");
 		const data = (await res.json()) as Array<{
 			id: number;
 			name: string;
+			county?: string;
 			total_cases: number;
 			failure_to_appear_count: number;
 			new_arrest_count: number;
@@ -1678,12 +1836,29 @@ async function scrapeMiami(cityName: string): Promise<{
 		}>;
 
 		for (const cw of data) {
+			// Two upstream rows are release-disposition reasons, not people. See
+			// CW_NON_JUDGE_ROWS in audit.ts for the full measurement of why no
+			// in-feed or cross-source discriminator exists.
+			if (isCourtWatchNonJudgeRow(cw.id, cw.name)) {
+				excluded.push(`cw-${cw.id} "${cw.name}"`);
+				continue;
+			}
+			// The county the feed itself reports. Phrased the way CourtWatch's own
+			// UI phrases it ("<county> County, FL") rather than naming a specific
+			// court: Bay rows mix county-court (CTMA/MMMA) and circuit (CFMA) case
+			// types, so claiming one named court for a judge would be a fact we
+			// cannot support.
+			const court = cw.county ? `${cw.county} County, FL` : "Florida";
+			if (cw.county) jurisdictions[`cw-${cw.id}`] = cw.county;
 			judges.push({
 				id: `cw-${cw.id}`,
 				name: cw.name,
-				city: cityName,
+				// County, not `cityName`. This is also what distinguishes the two
+				// "John Beamer" rows (Orange vs Osceola) without asserting whether
+				// they are one person or two.
+				city: cw.county ? `${cw.county} County` : cityName,
 				state: "Florida",
-				court: "Circuit Court, Orange County, FL",
+				court,
 				total_cases: cw.total_cases,
 				fta_count: cw.failure_to_appear_count,
 				rearrest_count: cw.new_arrest_count,
@@ -1695,6 +1870,8 @@ async function scrapeMiami(cityName: string): Promise<{
 		/* fallback handled by caller */
 	}
 	return {
+		excluded,
+		jurisdictions,
 		judges,
 		source: "CourtWatch.us — Florida Citizens Right to Know Act (FSS 907.043)",
 		metric_labels: {
@@ -2837,8 +3014,8 @@ footer a{color:var(--gold)}
 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px" class="how-grid">
 
 <div style="padding:18px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
-<div style="font-size:.75rem;color:var(--gold);font-family:var(--mono);letter-spacing:.05em;margin-bottom:6px">MIAMI · FLORIDA</div>
-<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge pretrial outcomes</strong> — missed court, rearrests, release revocations.</p>
+<div style="font-size:.75rem;color:var(--gold);font-family:var(--mono);letter-spacing:.05em;margin-bottom:6px">FLORIDA · COUNTY REGISTERS</div>
+<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge pretrial outcomes</strong> — missed court, rearrests, release revocations. Each judge is listed under the county their register reports.</p>
 <p style="color:var(--t3);font-size:.75rem;margin:0">Source: <a href="https://courtwatch.us" target="_blank" style="color:var(--gold)">CourtWatch.us</a> (FSS 907.043 public disclosure law)</p>
 </div>
 
@@ -2910,7 +3087,12 @@ footer a{color:var(--gold)}
 <script>
 const $=id=>document.getElementById(id);
 const CITIES=[
-  {slug:'miami',label:'Miami',lat:25.76,lng:-80.19,live:true},
+  // The 'miami' slug is a Florida-wide CourtWatch feed, not a Miami one: the
+  // counties it covers are Orange, Bay, Osceola and Monroe (none is
+  // Miami-Dade), so the pin sits at the state's geographic centre rather than
+  // asserting these judges sit in Miami. The slug itself is the R2 key and the
+  // deep-link parameter, so it stays.
+  {slug:'miami',label:'Florida',lat:28.6,lng:-82.4,live:true},
   {slug:'chicago',label:'Chicago',lat:41.88,lng:-87.63,live:true},
   {slug:'atlanta',label:'Atlanta',lat:33.75,lng:-84.39,live:true},
   {slug:'san-francisco',label:'San Francisco',lat:37.77,lng:-122.42,live:true},
