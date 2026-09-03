@@ -3,6 +3,17 @@ preview_urls = false
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
+# Workers Logs. Matters most for the daily cron below: a scheduled() handler
+# that throws emits NO console output, so without invocation logs a silently
+# failing 06:00 refresh is indistinguishable from a healthy one.
+# head_sampling_rate=1 keeps 100%. Takes effect on the NEXT deploy.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = true
+
 [[r2_buckets]]
 binding = "DATA"
 bucket_name = "judge-data"
