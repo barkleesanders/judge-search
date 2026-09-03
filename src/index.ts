@@ -341,8 +341,13 @@ const PUBLIC_CACHE = "public, max-age=300, stale-while-revalidate=3600";
 
 // Shared security + cache headers for every server-rendered HTML page, so the
 // homepage and /judges cannot drift apart. CSP allow-list is exactly what the
-// pages load: Leaflet from unpkg, Google Fonts, CartoDB dark basemap tiles;
-// inline style/script blocks are part of the single-file HTML.
+// pages load: Leaflet from unpkg, Google Fonts, and OpenStreetMap raster tiles
+// (was CARTO until 2026-09-03 — see the tileLayer comment); inline style/script
+// blocks are part of the single-file HTML.
+//
+// The img-src host here and the L.tileLayer() URL are ONE fact in two places.
+// Changing either alone is silent: a tile host missing from img-src is blocked
+// with no server-side error and the map renders blank.
 function htmlResponse(body: string, status = 200): Response {
 	return new Response(body, {
 		status,
@@ -355,6 +360,11 @@ function htmlResponse(body: string, status = 200): Response {
 			"x-frame-options": "DENY",
 			"referrer-policy": "strict-origin-when-cross-origin",
 			"permissions-policy": "camera=(), microphone=(), geolocation=()",
+			// workers.dev is on the HSTS preload list, so browsers already force
+			// HTTPS here — but the header is what a scanner reads, and it is what
+			// keeps this correct if the worker is ever bound to a custom domain,
+			// where nothing else would enforce it.
+			"strict-transport-security": "max-age=31536000; includeSubDomains; preload",
 		},
 	});
 }
