@@ -364,7 +364,8 @@ function htmlResponse(body: string, status = 200): Response {
 			// HTTPS here — but the header is what a scanner reads, and it is what
 			// keeps this correct if the worker is ever bound to a custom domain,
 			// where nothing else would enforce it.
-			"strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+			"strict-transport-security":
+				"max-age=31536000; includeSubDomains; preload",
 		},
 	});
 }
