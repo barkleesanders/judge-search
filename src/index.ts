@@ -88,6 +88,10 @@ interface JudgeIndexEntry {
 interface JudgeIndex {
 	count: number;
 	cities: number;
+	// R2 keys that could not be parsed this build. Normally empty; a non-empty
+	// list is why `count` is lower than expected, instead of leaving the caller
+	// to guess whether judges were lost or never existed.
+	unreadable: string[];
 	generated_at: string;
 	judges: JudgeIndexEntry[];
 }
@@ -305,14 +309,14 @@ async function handleJudge(url: URL, env: Env): Promise<Response> {
 
 // ── API: List all seeded cities ──
 async function handleCities(env: Env): Promise<Response> {
-	const list = await env.DATA.list({ prefix: "courts/" });
+	const keys = await listCourtKeys(env);
 	const cities = [];
-	for (const obj of list.objects) {
-		const data = await env.DATA.get(obj.key);
+	for (const key of keys) {
+		const data = await env.DATA.get(key);
 		if (data) {
 			const parsed = JSON.parse(await data.text()) as CityData;
 			cities.push({
-				slug: obj.key.replace("courts/", "").replace(".json", ""),
+				slug: key.replace("courts/", "").replace(".json", ""),
 				city: parsed.city,
 				state: parsed.state,
 				judges: parsed.judges.length,
@@ -355,6 +359,22 @@ function htmlResponse(body: string, status = 200): Response {
 	});
 }
 
+// R2's list() caps a page at 1000 keys (ceiling: R2 API max per request) and
+// reports the shortfall only via `truncated`. Ignoring the cursor is the silent
+// kind of wrong: a truncated page reads exactly like "that is all the cities".
+// 9 objects today, so this loop runs once — it exists so the cliff at 1000 is
+// never reached rather than never noticed.
+async function listCourtKeys(env: Env): Promise<string[]> {
+	const keys: string[] = [];
+	let cursor: string | undefined;
+	for (;;) {
+		const page = await env.DATA.list({ prefix: "courts/", cursor });
+		for (const obj of page.objects) keys.push(obj.key);
+		if (!page.truncated) return keys;
+		cursor = page.cursor;
+	}
+}
+
 // ── Global judge index ──
 // Reads every courts/<slug>.json once and flattens them into one lean list.
 // That is 8–9 R2 GETs, so this must never run per-keystroke: the client fetches
@@ -365,17 +385,27 @@ function htmlResponse(body: string, status = 200): Response {
 // hardcoded slug list: it is what excludes the `test-check` placeholder bucket
 // without pinning the code to that name (a future empty bucket drops too).
 async function buildJudgeIndex(env: Env): Promise<JudgeIndex> {
-	const list = await env.DATA.list({ prefix: "courts/" });
+	const keys = await listCourtKeys(env);
 	const judges: JudgeIndexEntry[] = [];
+	const unreadable: string[] = [];
 	let cities = 0;
 
-	for (const obj of list.objects) {
-		const data = await env.DATA.get(obj.key);
+	for (const key of keys) {
+		const data = await env.DATA.get(key);
 		if (!data) continue;
-		const parsed = JSON.parse(await data.text()) as CityData;
+		// One malformed object must not 500 the whole index — but it must not
+		// vanish silently either, or a shrunken index reads as "fewer judges".
+		let parsed: CityData;
+		try {
+			parsed = JSON.parse(await data.text()) as CityData;
+		} catch (e) {
+			console.log("[judge-index] unreadable object", key, String(e));
+			unreadable.push(key);
+			continue;
+		}
 		if (!Array.isArray(parsed.judges) || parsed.judges.length === 0) continue;
 		cities++;
-		const slug = obj.key.replace("courts/", "").replace(".json", "");
+		const slug = key.replace("courts/", "").replace(".json", "");
 		for (const j of parsed.judges) {
 			judges.push({
 				id: j.id,
@@ -397,26 +427,52 @@ async function buildJudgeIndex(env: Env): Promise<JudgeIndex> {
 	return {
 		count: judges.length,
 		cities,
+		unreadable,
 		generated_at: new Date().toISOString(),
 		judges,
 	};
 }
 
-// "Judge Linda Colfax" → "colfax linda". Stored names carry a "Judge "/"Hon."
-// prefix and sometimes a suffix (Jr., III) that must not become the sort key.
+// Split a stored name into surname + the rest, for A–Z filing and sorting.
+// Names carry a "Judge "/"Hon." prefix, and the upstream feeds use TWO orders
+// that have to be handled separately:
+//   "Judge Linda Colfax"      (SF, Miami, …) → surname is the LAST word
+//   "Judge Bondy, Matthew A." (NY OCA)       → surname is everything BEFORE the comma
+// Measured 2026-09-03 against the live data: 231 of 464 names (49%) are the
+// comma form, and treating their last word as the surname filed 215 judges
+// (46%) under the wrong letter — New York's middle initials piled up under "A".
+// A trailing initial or generational suffix is never the surname either.
 const NAME_PREFIX =
 	/^(the\s+)?(hon(ourable|orable)?\.?|judge|justice|magistrate|commissioner)\s+/i;
 const NAME_SUFFIX = /^(jr|sr|ii|iii|iv|v|esq)\.?$/i;
+const NAME_INITIAL = /^[a-z]\.?$/i;
 
 function nameParts(fullName: string): { last: string; rest: string } {
 	const bare = (fullName || "").replace(NAME_PREFIX, "").trim();
+
+	const comma = bare.indexOf(",");
+	if (comma > 0) {
+		return {
+			last: bare.slice(0, comma).trim(),
+			rest: bare.slice(comma + 1).trim(),
+		};
+	}
+
+	// ceiling: surname particles are not joined, so "Christine Van Aken" files
+	// under A rather than V. Measured 2026-09-03: exactly 1 of 464 names. A
+	// particle list (van/von/de/della/mac/o') would fix it and would also start
+	// misfiling anyone whose real surname begins with one, so it is not worth it
+	// at n=1 — revisit if a feed lands with many Dutch/Italian/Spanish surnames.
 	const words = bare.split(/\s+/).filter(Boolean);
-	while (words.length > 1 && NAME_SUFFIX.test(words[words.length - 1])) {
+	while (
+		words.length > 1 &&
+		(NAME_SUFFIX.test(words[words.length - 1]) ||
+			NAME_INITIAL.test(words[words.length - 1]))
+	) {
 		words.pop();
 	}
 	if (words.length === 0) return { last: "", rest: "" };
-	const last = words[words.length - 1];
-	return { last, rest: words.slice(0, -1).join(" ") };
+	return { last: words[words.length - 1], rest: words.slice(0, -1).join(" ") };
 }
 
 function sortKey(fullName: string): string {
