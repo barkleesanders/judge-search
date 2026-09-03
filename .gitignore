@@ -19,3 +19,9 @@ scrapers/.tmp-*.json
 
 # Claude Code local state
 .claude/
+
+# macOS
+.DS_Store
+
+# beads gate lock
+.beads.gate.lock
