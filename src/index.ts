@@ -350,7 +350,7 @@ function htmlResponse(body: string, status = 200): Response {
 			"content-type": "text/html;charset=utf-8",
 			"cache-control": PUBLIC_CACHE,
 			"content-security-policy":
-				"default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+				"default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tile.openstreetmap.org https://unpkg.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
 			"x-content-type-options": "nosniff",
 			"x-frame-options": "DENY",
 			"referrer-policy": "strict-origin-when-cross-origin",
@@ -2546,6 +2546,10 @@ nav{position:sticky;top:0;z-index:50;background:rgba(10,10,10,.95);backdrop-filt
 .ml-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
 .leaflet-popup-content-wrapper{background:var(--s)!important;color:var(--t)!important;border:1px solid var(--b2)!important;border-radius:var(--r)!important;font-family:var(--sans)!important}
 .leaflet-popup-tip{background:var(--s)!important}
+/* OSM ships a LIGHT basemap; invert it to match this dark page. Scoped to the
+   TILE pane on purpose — the marker pane is a sibling, so the gold city dots
+   and their glow keep their real colours instead of inverting to blue. */
+.leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.95)}
 .leaflet-control-attribution{background:rgba(10,10,10,.8)!important;color:var(--t3)!important;font-size:.6rem!important}
 .leaflet-control-attribution a{color:var(--gold)!important}
 .leaflet-control-zoom a{background:var(--s)!important;color:var(--gold)!important;border-color:var(--b)!important}
@@ -2912,9 +2916,31 @@ $('pills').innerHTML=CITIES.map(c=>
 
 // Leaflet map
 let map=L.map('leaflet-map',{scrollWheelZoom:false}).setView([39,-96],4);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-  subdomains:'abcd',maxZoom:18
+// Basemap: OpenStreetMap raster, darkened in CSS (see .leaflet-tile-pane).
+//
+// Was CARTO dark_all until 2026-09-03. CARTO now requires an API key for its
+// basemaps and serves unkeyed requests as a VALID 200 image/png with
+// "API KEY REQUIRED / carto.com/basemaps/apikey" watermarked diagonally into
+// the tile. That is why this failed silently: status, size and content-type
+// are all indistinguishable from a good tile, so only looking at the pixels
+// catches it. Measured 2026-09-03 — 1x (7387 b) and @2x (19568 b) are both
+// watermarked, no-referer is byte-identical, and the legacy
+// cartodb-basemaps-*.global.ssl.fastly.net host returns the same 7387 b tile.
+// It is a policy change, not a usage cap.
+//
+// OSM has no key and no quota. Its tile policy (operations.osmfoundation.org/
+// policies/tiles/, retrieved 2026-09-03) permits public websites provided the
+// browser sends a Referer (it does), tiles are cached >=7 days (Leaflet honours
+// the upstream headers), and nothing bulk-prefetches. maxZoom 18 keeps us off
+// the z>=14 automated-scan behaviour the policy calls out.
+//
+// NOTE: the img-src CSP directive must list this host or every tile is blocked
+// and the map goes BLANK — a worse failure than the watermark. Verified by
+// swapping the URL alone in the live DOM: 15/15 tiles refused. Keep the tile
+// host and the CSP in sync.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom:18
 }).addTo(map);
 CITIES.forEach(c=>{
   const color=c.live?'#c8a84b':'#555';
@@ -2942,6 +2968,13 @@ function loadCity(el){
 // (volume × rate, the absolute-harm view).
 let _currentCity=null;
 let _sortMode='rate';
+// Whether the overflow table ("Show N more judges") is expanded. This is
+// MODULE-level, not DOM-level, on purpose: setSort() re-renders the whole
+// results area, so a class toggled on the old table is destroyed on every tab
+// switch. A visitor who expanded the full list, then switched from By rate to
+// By total rearrests, silently got a collapsed 12-of-32 view back — which reads
+// as "this tab is missing judges" rather than "your list re-collapsed".
+let _showAll=false;
 
 async function fetchCity(slug){
   const area=$('results');
@@ -3387,10 +3420,10 @@ function render(d){
 
       h+='<div style="background:linear-gradient(135deg,rgba(232,64,64,.08),rgba(200,168,75,.06));border:1px solid var(--b2);border-radius:var(--r);padding:22px 22px 18px;margin-bottom:24px">';
       h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:6px">RELEASED BEFORE TRIAL — WHAT HAPPENED NEXT</div>';
-      h+='<div style="color:var(--t);font-size:1rem;line-height:1.5;margin-bottom:18px">In '+esc(d.city)+', when one of these '+eligible.length+' judges sent a defendant home to wait for trial, here is how often that person was charged with a new crime <em>before</em> the case ended. Three judges, side by side:</div>';
+      h+='<div style="color:var(--t);font-size:1rem;line-height:1.5;margin-bottom:18px">In '+esc(d.city)+', when one of these '+eligible.length+' judges (of '+d.judges.length+' total \u2014 these are the ones with at least 100 cases) sent a defendant home to wait for trial, here is how often that person was charged with a new crime <em>before</em> the case ended. Three judges, side by side:</div>';
 
       h+=bar('Lowest rate',null,lowJ,lowRate);
-      h+=bar('Average across all '+eligible.length+' judges','—',null,avgRate);
+      h+=bar('Average across those '+eligible.length+' judges','—',null,avgRate);
       h+=bar('Highest rate',null,highJ,highRate);
 
       h+='<div style="color:var(--t);font-size:.95rem;line-height:1.5;margin:6px 0 0;padding-top:14px;border-top:1px solid var(--b)">Same city. Same kind of crime, sometimes. <strong>Different judge — very different outcome.</strong> Scroll down to see where every judge in '+esc(d.city)+' falls.</div>';
@@ -3540,8 +3573,11 @@ function render(d){
   // Remaining judges as compact table
   if(restJudges.length>0){
     h+='<div class="more-judges">';
-    h+='<button class="more-toggle" onclick="document.querySelector(\\'.jtable\\').classList.toggle(\\'.show\\');this.textContent=this.textContent.includes(\\'Show\\')?\\'\u25B2 Hide\\':(\\'\\u25BC Show '+restJudges.length+' More Judges\\')">\\u25BC Show '+restJudges.length+' More Judges</button>';
-    h+='<table class="jtable">';
+    // No inline onclick: the old one called classList.toggle('.show') with a
+    // leading dot, adding a class literally named ".show" that matches no
+    // selector. It was invisible because the handler below reassigns onclick.
+    h+='<button class="more-toggle" type="button">'+(_showAll?'\u25B2 Hide '+restJudges.length+' more judges':'\u25BC Show all '+d.judges.length+' judges ('+restJudges.length+' more)')+'</button>';
+    h+='<table class="jtable'+(_showAll?' show':'')+'">';
     h+='<thead><tr><th>Name</th><th>Court</th><th class="num">Cases</th><th class="num">'+esc(lbl.fta)+'</th><th class="num">'+esc(lbl.rearrest)+'</th><th class="num">'+esc(lbl.revocation)+'</th><th class="num">Rate %</th></tr></thead>';
     h+='<tbody>';
     for(const j of restJudges){
@@ -3565,6 +3601,7 @@ function render(d){
       const tbl=document.querySelector('.jtable');
       if(tbl){
         tbl.classList.toggle('show');
+        _showAll=tbl.classList.contains('show');
         this.textContent=tbl.classList.contains('show')?'\\u25B2 Hide remaining judges':'\\u25BC Show '+restJudges.length+' more judges';
       }
     };
