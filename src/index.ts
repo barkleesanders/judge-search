@@ -3067,14 +3067,36 @@ function pickHit(i){
   focusJudge(j.id,j.slug);
 }
 
+// Find a city pill WITHOUT building a CSS selector out of the value. A slug can
+// arrive from the query string, and interpolating one into an attribute
+// selector throws an uncaught SyntaxError on anything containing a quote or a
+// bracket (measured: /?judge=x&city=%22%5D). Comparing dataset values cannot
+// throw, whatever the input.
+function pillFor(slug){
+  const pills=document.querySelectorAll('.pill');
+  for(let i=0;i<pills.length;i++){if(pills[i].dataset.slug===slug)return pills[i];}
+  return null;
+}
+
 // Load the judge's city through the SAME path a pill click uses, then let
 // render() scroll to and flash the row. Landing the visitor in the right city
 // without showing them the judge they asked for is not an answer.
+//
+// An unrecognised slug is never fetched directly — it is re-resolved from the
+// index by judge id, so a malformed or hand-edited link degrades to "nothing
+// happens" instead of an error banner driven by the URL.
 function focusJudge(id,slug){
-  _pendingFocus=id;
-  const pill=document.querySelector('[data-slug="'+slug+'"]');
-  if(pill)loadCity(pill);
-  else fetchCity(slug);
+  const pill=pillFor(slug);
+  if(pill){_pendingFocus=id;loadCity(pill);return;}
+  loadIndex().then(function(list){
+    for(let i=0;i<list.length;i++){
+      if(list[i].id===id){
+        const p2=pillFor(list[i].slug);
+        if(p2){_pendingFocus=id;loadCity(p2);}
+        return;
+      }
+    }
+  }).catch(function(){});
 }
 
 function applyPendingFocus(){
@@ -3129,11 +3151,7 @@ function applyPendingFocus(){
   const sp=new URLSearchParams(location.search);
   const jid=sp.get('judge');
   if(!jid)return;
-  const city=sp.get('city');
-  if(city){focusJudge(jid,city);return;}
-  loadIndex().then(function(list){
-    for(let i=0;i<list.length;i++){if(list[i].id===jid){focusJudge(list[i].id,list[i].slug);return;}}
-  }).catch(function(){});
+  focusJudge(jid,sp.get('city')||'');
 })();
 
 function render(d){
