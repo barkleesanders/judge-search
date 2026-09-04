@@ -179,6 +179,21 @@ export default {
 			return handleUploadRaw(request, url, env);
 		if (p === "/api/process-ny-oca") return handleProcessNyOca(url, env);
 
+		// Crawler + disclosure files. These MUST be matched before the catch-all:
+		// until 2026-09-04 every one of them fell through to htmlResponse(HTML), so
+		// /robots.txt and /sitemap.xml answered 200 with 87 KB of text/html — a
+		// crawler asking for robots got a web page, and a sitemap submitted to
+		// Search Console would not parse. Measured against production that day.
+		if (p === "/robots.txt") return robotsResponse(url);
+		if (p === "/sitemap.xml") return sitemapResponse(url);
+		// RFC 9116 documents BOTH paths; only the well-known one is authoritative,
+		// so the short path redirects rather than duplicating the file.
+		if (p === "/security.txt")
+			return Response.redirect(
+				new URL("/.well-known/security.txt", url).toString(),
+				301,
+			);
+
 		// Static assets from R2
 		if (p === "/favicon.png" || p === "/favicon.svg" || p === "/og-image.png") {
 			const key = `static${p}`;
@@ -2766,6 +2781,68 @@ function json(data: unknown, status = 200) {
 		headers: {
 			"content-type": "application/json",
 			"access-control-allow-origin": "*",
+		},
+	});
+}
+
+// ── Crawler files ──
+
+/**
+ * The site is two crawlable surfaces: the homepage and the server-rendered A–Z
+ * index at /judges. Everything else is an API route, and none of it belongs in
+ * a search index.
+ *
+ * The host is taken from the REQUEST, not hardcoded: this Worker answers on
+ * judge-search.barkleesanders.workers.dev today, and a sitemap that names a
+ * different origin than the one it was fetched from is ignored by crawlers.
+ */
+function siteUrls(url: URL): string[] {
+	return [`${url.origin}/`, `${url.origin}/judges`];
+}
+
+/**
+ * lastmod is the date of the last commit that changed src/index.ts, because
+ * that single file IS both pages — there is no per-page source to date them
+ * separately, and inventing distinct dates would be a fabrication. /ship's
+ * Phase 1.4-lastmod bumps this when the page content changes.
+ */
+const SITEMAP_LASTMOD = "2026-09-04";
+
+function sitemapResponse(url: URL): Response {
+	const body =
+		'<?xml version="1.0" encoding="UTF-8"?>\n' +
+		'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+		siteUrls(url)
+			.map(
+				(loc) =>
+					`  <url><loc>${escapeHtml(loc)}</loc><lastmod>${SITEMAP_LASTMOD}</lastmod></url>\n`,
+			)
+			.join("") +
+		"</urlset>\n";
+	return new Response(body, {
+		headers: {
+			"content-type": "application/xml; charset=utf-8",
+			"cache-control": "public, max-age=3600",
+		},
+	});
+}
+
+function robotsResponse(url: URL): Response {
+	// The /api/* surface is data for this page, not content for an index, and
+	// crawling it burns R2 reads for no one's benefit. Everything else is open:
+	// this is a public-records site and being findable is the entire point.
+	const body = [
+		"User-agent: *",
+		"Disallow: /api/",
+		"Allow: /",
+		"",
+		`Sitemap: ${url.origin}/sitemap.xml`,
+		"",
+	].join("\n");
+	return new Response(body, {
+		headers: {
+			"content-type": "text/plain; charset=utf-8",
+			"cache-control": "public, max-age=3600",
 		},
 	});
 }

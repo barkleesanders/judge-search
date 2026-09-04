@@ -20,18 +20,48 @@ import { bodyOf } from "./source-probe.ts";
 
 const SECRET = "test-upload-secret";
 
-// Minimal R2 stub. A DENIED request never reaches it — that is the whole point,
-// the gate runs before any handler — but an ALLOWED one does, and without this
-// the handler throws on `env.DATA.get` and the test cannot read a status.
-const emptyR2 = {
+/**
+ * An R2 bucket that is simply EMPTY.
+ *
+ * A DENIED request never reaches it — that is the whole point, the gate runs
+ * before any handler — but an ALLOWED one does, and without a stub the handler
+ * throws on `env.DATA.get` and the test cannot read a status.
+ *
+ * Every member of R2Bucket is implemented, so the object satisfies the real
+ * interface with NO type assertion — reads return "empty", and the writes
+ * THROW.
+ *
+ * Throwing is deliberate, not laziness. This file tests the AUTH GATE; no test
+ * here asserts that a write succeeds, and passedGate() already documents a
+ * throw from inside a handler as proof the request got past auth. Returning a
+ * fabricated R2Object instead would need a cast and would let a future test
+ * quietly "pass" a write that never happened. The message names the method, so
+ * whoever does need a real write result is told exactly what to stub.
+ */
+const emptyR2: R2Bucket = {
 	get: async () => null,
-	put: async () => undefined,
-	list: async () => ({ objects: [], truncated: false }),
+	head: async () => null,
+	list: async () => ({
+		objects: [],
+		truncated: false as const,
+		delimitedPrefixes: [],
+	}),
 	delete: async () => undefined,
+	put: () => {
+		throw new Error(
+			"emptyR2: put() is not stubbed — this suite tests auth, not writes",
+		);
+	},
+	createMultipartUpload: () => {
+		throw new Error("emptyR2: createMultipartUpload() is not stubbed");
+	},
+	resumeMultipartUpload: () => {
+		throw new Error("emptyR2: resumeMultipartUpload() is not stubbed");
+	},
 };
-const env = { UPLOAD_SECRET: SECRET, DATA: emptyR2 } as unknown as Parameters<
-	typeof worker.fetch
->[1];
+
+type WorkerEnv = Parameters<typeof worker.fetch>[1];
+const env: WorkerEnv = { UPLOAD_SECRET: SECRET, DATA: emptyR2 };
 
 /**
  * Did the request get PAST the auth gate?
@@ -98,7 +128,9 @@ for (const p of WRITE_PATHS) {
 }
 
 test("write routes fail CLOSED when UPLOAD_SECRET is unset", async () => {
-	const noSecret = {} as unknown as Parameters<typeof worker.fetch>[1];
+	// UPLOAD_SECRET is optional on Env, so an unconfigured Worker is a real,
+	// type-checkable state — not something to fabricate with a cast.
+	const noSecret: WorkerEnv = { DATA: emptyR2 };
 	for (const p of WRITE_PATHS) {
 		// Even an empty bearer must not match an empty/undefined secret.
 		const res = await worker.fetch(req(p, ""), noSecret);
