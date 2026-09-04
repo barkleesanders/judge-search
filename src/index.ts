@@ -2149,16 +2149,45 @@ async function scrapeAtlanta(cityName: string): Promise<{
 // LASC's media portal is an Angular SPA gated by reCAPTCHA; LA County's data
 // portal has no criminal disposition datasets keyed to judge names.
 // Strategy: CourtListener v4 bios for LASC judges (v4 required — v3 returns 0).
-// Fetch a single count from a Socrata-compatible endpoint
+/**
+ * Fetch a single count from a Socrata-compatible endpoint.
+ *
+ * Returns 0 on every failure, and callers treat 0 as "omit the stat block" —
+ * which is the right BEHAVIOUR (never render a fabricated zero) but was
+ * previously SILENT: a genuinely-zero count, a retired dataset, and a malformed
+ * query were indistinguishable, in the logs and everywhere else.
+ *
+ * Measured 2026-09-04: `data.houstontx.gov/resource/hz6g-h7f6` returns 404 —
+ * the dataset is gone — so the Texas stat block has been quietly absent, with
+ * nothing anywhere saying why. The count still degrades to 0; it now says so.
+ */
 async function socrataCount(url: string): Promise<number> {
+	const host = (() => {
+		try {
+			return new URL(url).host;
+		} catch {
+			return "unparseable-url";
+		}
+	})();
 	try {
 		const res = await fetch(url, {
 			headers: { "User-Agent": "JudgeSearch/2" },
 		});
-		if (!res.ok) return 0;
+		if (!res.ok) {
+			// Log the host + status, never the full URL: a Socrata query string
+			// can carry an app token on other endpoints.
+			console.log(`[socrata] ${host} returned ${res.status} — stat omitted`);
+			return 0;
+		}
 		const data = (await res.json()) as Array<{ count?: string }>;
-		return Number(data[0]?.count || 0);
-	} catch {
+		const n = Number(data[0]?.count || 0);
+		if (!n)
+			console.log(`[socrata] ${host} returned no count rows — stat omitted`);
+		return n;
+	} catch (e) {
+		console.log(
+			`[socrata] ${host} fetch failed: ${e instanceof Error ? e.message : String(e)} — stat omitted`,
+		);
 		return 0;
 	}
 }
