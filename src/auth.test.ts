@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import worker, { MUTATING_ROUTES } from "./index.ts";
+import { bodyOf } from "./source-probe.ts";
 
 const SECRET = "test-upload-secret";
 
@@ -115,25 +116,6 @@ test("read-only routes stay public (no token required)", async () => {
 // The tests above pin today's five routes. This one fails on TOMORROW's: any
 // new route whose handler writes R2 but which nobody added to MUTATING_ROUTES.
 // A behavioural test can only cover paths someone remembered to list.
-
-/** Extract a function body by brace-matching. Throws rather than returning ""
- *  — an extractor that returns empty makes every `includes` check silently
- *  false, converting one broken helper into a suite-wide false negative. */
-function bodyOf(decl: string, src: string): string {
-	const start = src.indexOf(decl);
-	if (start === -1) throw new Error(`declaration not found: ${decl}`);
-	let depth = 0;
-	let seen = false;
-	for (let i = start; i < src.length; i++) {
-		if (src[i] === "{") {
-			depth++;
-			seen = true;
-		} else if (src[i] === "}" && seen && --depth === 0) {
-			return src.slice(start, i + 1);
-		}
-	}
-	throw new Error(`unbalanced braces after: ${decl}`);
-}
 
 test("every dispatched route whose handler writes R2 is in MUTATING_ROUTES", () => {
 	const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");

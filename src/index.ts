@@ -2771,7 +2771,9 @@ function json(data: unknown, status = 200) {
 }
 
 // ── HTML ──
-const HTML = `<!DOCTYPE html>
+// Exported so tests can assert over the RENDERED client script (template
+// escapes already resolved) rather than the raw source text.
+export const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -3441,7 +3443,54 @@ function pickHit(i){
   if(!j)return;
   closeSearch();
   const q=$('jq');if(q)q.value=j.name;
+  // Leave the SAME canonical deep link the /judges page emits (judgeHref), so a
+  // URL copied after picking from the dropdown reopens exactly this judge.
+  if(history.replaceState){
+    try{history.replaceState(null,'','/?judge='+encodeURIComponent(j.id)+'&city='+encodeURIComponent(j.slug));}catch(e){}
+  }
   focusJudge(j.id,j.slug);
+}
+
+// ── URL-addressable search: /?q=<name> ────────────────────
+// The address bar IS the search state: typing rewrites ?q=, and a link carrying
+// ?q= reproduces the same results on load, so a search is shareable.
+//
+// replaceState, not pushState — one history entry per keystroke would bury the
+// page the visitor arrived from under a dozen back-presses.
+function syncUrl(v){
+  if(!history.replaceState)return;
+  try{
+    const u=new URL(location.href);
+    if(v)u.searchParams.set('q',v);else u.searchParams.delete('q');
+    // A live search and a judge deep-link are different states. Once the visitor
+    // types, ?judge= no longer describes what they are looking at, so it must not
+    // survive into a URL they then reload or share.
+    u.searchParams.delete('judge');u.searchParams.delete('city');
+    history.replaceState(null,'',u.pathname+u.search+u.hash);
+  }catch(e){}
+}
+
+// EVERY writer of the search state goes through here — the input handler, the
+// on-load ?q= handler, and clearing — so the box, the dropdown and the URL can
+// never disagree. A new entry point calls this; it does not re-implement it.
+//
+// updateUrl=false when the URL is already the source of the query (page load),
+// so restoring a shared link never rewrites the address bar it came from.
+function runSearch(v,updateUrl){
+  const box=$('jq');
+  if(box&&box.value!==v)box.value=v;
+  if(updateUrl!==false)syncUrl(v);
+  if(!v.trim()){closeSearch();jStatus('');return;}
+  if(_index){renderHits(searchJudges(v),v);return;}
+  const pop=$('jresults');
+  if(pop)pop.innerHTML='<div class="jsearch-msg">Loading judge index\\u2026</div>';
+  openSearch();
+  loadIndex().then(function(){
+    // Re-read the box rather than reusing v: the visitor keeps typing while the
+    // index loads, and rendering the stale query would discard those keystrokes.
+    const cur=$('jq'),now=cur?cur.value:v;
+    renderHits(searchJudges(now),now);
+  }).catch(function(e){if(pop)pop.innerHTML='<div class="jsearch-msg">'+esc(e.message)+'</div>';});
 }
 
 // Find a city pill WITHOUT building a CSS selector out of the value. A slug can
@@ -3498,16 +3547,7 @@ function applyPendingFocus(){
   if(!q)return;
   let warmed=false;
   q.addEventListener('focus',function(){if(warmed)return;warmed=true;loadIndex().catch(function(){});});
-  q.addEventListener('input',function(){
-    const v=q.value;
-    if(!v.trim()){closeSearch();jStatus('');return;}
-    if(_index){renderHits(searchJudges(v),v);return;}
-    const pop=$('jresults');
-    if(pop)pop.innerHTML='<div class="jsearch-msg">Loading judge index\\u2026</div>';
-    openSearch();
-    loadIndex().then(function(){renderHits(searchJudges(q.value),q.value);})
-      .catch(function(e){if(pop)pop.innerHTML='<div class="jsearch-msg">'+esc(e.message)+'</div>';});
-  });
+  q.addEventListener('input',function(){runSearch(q.value,true);});
   q.addEventListener('keydown',function(e){
     if(e.key==='Escape'){closeSearch();q.blur();return;}
     if(!_hits.length)return;
@@ -3521,14 +3561,21 @@ function applyPendingFocus(){
   });
 })();
 
-// Shareable per-judge deep link: /?judge=<id>&city=<slug>. The city rides in the
-// URL so the common case costs zero extra requests; a link that lost it still
-// resolves by looking the id up in the index.
+// Shareable links, two schemes:
+//   /?judge=<id>&city=<slug>  one judge     (city rides along so the common case
+//                                            costs zero extra requests; a link
+//                                            that lost it still resolves by
+//                                            looking the id up in the index)
+//   /?q=<name>                a name search (reproduces the dropdown on load)
+//
+// ?judge= wins when both are present: it names one specific judge, which is
+// strictly more resolved than a query that may match several.
 (function(){
   const sp=new URLSearchParams(location.search);
   const jid=sp.get('judge');
-  if(!jid)return;
-  focusJudge(jid,sp.get('city')||'');
+  if(jid){focusJudge(jid,sp.get('city')||'');return;}
+  const q=sp.get('q');
+  if(q&&q.trim())runSearch(q,false);
 })();
 
 function render(d){
