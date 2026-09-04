@@ -695,7 +695,7 @@ footer a{color:var(--gold)}
 ${sections}
 </div>
 <footer>
-<p>Public court data &middot; <a href="/">Search by name</a> &middot; <a href="/#method">About</a> &middot; <a href="/#sources">Sources</a></p>
+<p>Public court data &middot; <a href="/">Search by name</a> &middot; <a href="/#method">About</a> &middot; <a href="/#sources">Sources</a> &middot; <a href="https://github.com/barkleesanders/judge-search" target="_blank" rel="noopener">Source code</a></p>
 <p style="margin-top:8px;font-size:.72rem;color:var(--t3)">Not legal advice. All data is public record. &copy; 2025 JudgeSearch</p>
 </footer>
 </body>
@@ -2883,11 +2883,14 @@ export const HTML = `<!DOCTYPE html>
      The SearchAction is honest ONLY because /?q= really drives the search
      (shipped 2026-09-04); before that it would have advertised a capability
      the site did not have, which is why this block waited for that commit.
-     Organization carries no sameAs: no verified profile for JudgeSearch
-     exists, an empty list is the truthful answer, and a plausible-looking
-     guessed URL would be a fabrication with a valid shape. The data-source
-     links elsewhere on this page (CourtWatch, DataSF, CourtListener) are
-     sameAs for THOSE organisations, never for this one. -->
+     Organization.sameAs names exactly one profile: the GitHub repository this
+     site is deployed from, which the footer also links. That ordering is the
+     rule, not a coincidence -- a sameAs may only name a profile the site
+     itself publishes, so the footer link IS the evidence for the claim. A
+     plausible-looking guessed URL would be a fabrication with a valid shape
+     and would pass every structural check there is. Note the data-source links
+     elsewhere on this page (CourtWatch, DataSF, CourtListener) are sameAs for
+     THOSE organisations and must never appear here. -->
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -2913,7 +2916,8 @@ export const HTML = `<!DOCTYPE html>
       "@type": "Organization",
       "@id": "https://judge-search.barkleesanders.workers.dev/#org",
       "name": "JudgeSearch",
-      "url": "https://judge-search.barkleesanders.workers.dev/"
+      "url": "https://judge-search.barkleesanders.workers.dev/",
+      "sameAs": ["https://github.com/barkleesanders/judge-search"]
     }
   ]
 }
@@ -3294,7 +3298,7 @@ footer a{color:var(--gold)}
 </section>
 
 <footer>
-<p>Public court data · Built with <a href="https://free.law/about/" target="_blank">Free Law Project</a> data · <a href="/judges">All judges A&ndash;Z</a> · <a href="#method">About</a> · <a href="#sources">Sources</a></p>
+<p>Public court data · Built with <a href="https://free.law/about/" target="_blank">Free Law Project</a> data · <a href="/judges">All judges A&ndash;Z</a> · <a href="#method">About</a> · <a href="#sources">Sources</a> · <a href="https://github.com/barkleesanders/judge-search" target="_blank" rel="noopener">Source code</a></p>
 <p style="margin-top:8px;font-size:.72rem;color:var(--t3)">Not legal advice. All data is public record. &copy; 2025 JudgeSearch</p>
 </footer>
 

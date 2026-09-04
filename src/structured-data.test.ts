@@ -107,6 +107,50 @@ test("Organization.sameAs is either absent or genuinely populated", () => {
 	}
 });
 
+test("every sameAs URL is one the page actually publishes", () => {
+	// THE anti-fabrication invariant, and the reason this file exists.
+	//
+	// A guessed profile URL is a fabrication with a valid shape: it parses, it
+	// may even return 200, and no validator anywhere can tell it apart from a
+	// real one. The only mechanical defence is provenance — a sameAs may name
+	// ONLY a profile this site already links to, so the href IS the evidence
+	// for the claim. That turns a judgement call into something a test holds.
+	const org = node("Organization");
+	if (!("sameAs" in org)) return;
+	const hrefs = new Set(
+		[...HTML.matchAll(/href="(https?:\/\/[^"]+)"/g)].map((m) =>
+			m[1].replace(/\/$/, ""),
+		),
+	);
+	assert.ok(
+		hrefs.size > 0,
+		"parsed no hrefs out of the page at all — this check would pass vacuously",
+	);
+	for (const u of org.sameAs as string[]) {
+		assert.ok(
+			hrefs.has(String(u).replace(/\/$/, "")),
+			`sameAs names ${u} but the page links to no such URL. Either publish it, or it was invented — a plausible slug is a fabrication, not a source.`,
+		);
+	}
+});
+
+test("sameAs never claims a data source as this organisation", () => {
+	// The worse failure than a missing sameAs is entity confusion. This page
+	// links CourtWatch, DataSF, CourtListener and others; those are sameAs for
+	// THEIR organisations. Listing one here asserts JudgeSearch IS that body —
+	// a misrepresentation about a real third party, not an SEO tweak.
+	const org = node("Organization");
+	if (!("sameAs" in org)) return;
+	const foreign =
+		/courtwatch|data\.sfgov|datacatalog|data\.lacity|data\.kingcounty|data\.cityofnewyork|courtlistener|free\.law|sharefulton|harriscountytx|trellis\.law|huggingface/i;
+	for (const u of org.sameAs as string[]) {
+		assert.ok(
+			!foreign.test(String(u)),
+			`sameAs names ${u}, a DATA SOURCE — that asserts JudgeSearch is that organisation`,
+		);
+	}
+});
+
 test("the graph's internal @id references all resolve", () => {
 	// publisher points at the Organization by @id. A typo there yields a
 	// dangling reference that consumers drop silently, unlinking the two nodes.
