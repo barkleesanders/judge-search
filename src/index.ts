@@ -2856,6 +2856,7 @@ export const HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JudgeSearch — Know Your Judges. Hold Them Accountable.</title>
+<link rel="canonical" href="https://judge-search.barkleesanders.workers.dev/">
 <meta name="description" content="Search real court records across 8 U.S. cities. 880,000+ cases. See how often defendants released by each judge missed court, got rearrested, or had their release revoked. All public data.">
 <meta name="theme-color" content="#c8a84b">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -2878,6 +2879,45 @@ export const HTML = `<!DOCTYPE html>
 <meta name="twitter:description" content="Search 880,000+ court records across 8 U.S. cities. See which judges had the most missed court dates, rearrests, and release revocations. Public data, plain English.">
 <meta name="twitter:image" content="https://judge-search.barkleesanders.workers.dev/og-image.png?v=20260412">
 <meta name="twitter:image:alt" content="JudgeSearch — scales of justice, 8 cities, 225+ judges, 881K cases. Real open-data sources from CourtWatch, Cook County, Fulton County, DataSF, Harris County, and CourtListener.">
+<!-- Structured data. Every claim here is one the site can actually back.
+     The SearchAction is honest ONLY because /?q= really drives the search
+     (shipped 2026-09-04); before that it would have advertised a capability
+     the site did not have, which is why this block waited for that commit.
+     Organization carries no sameAs: no verified profile for JudgeSearch
+     exists, an empty list is the truthful answer, and a plausible-looking
+     guessed URL would be a fabrication with a valid shape. The data-source
+     links elsewhere on this page (CourtWatch, DataSF, CourtListener) are
+     sameAs for THOSE organisations, never for this one. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://judge-search.barkleesanders.workers.dev/#website",
+      "url": "https://judge-search.barkleesanders.workers.dev/",
+      "name": "JudgeSearch",
+      "description": "Search real court records across 8 U.S. cities. See how often defendants released by each judge missed court, got rearrested, or had their release revoked.",
+      "inLanguage": "en-US",
+      "publisher": { "@id": "https://judge-search.barkleesanders.workers.dev/#org" },
+      "potentialAction": {
+        "@type": "SearchAction",
+        "target": {
+          "@type": "EntryPoint",
+          "urlTemplate": "https://judge-search.barkleesanders.workers.dev/?q={search_term_string}"
+        },
+        "query-input": "required name=search_term_string"
+      }
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://judge-search.barkleesanders.workers.dev/#org",
+      "name": "JudgeSearch",
+      "url": "https://judge-search.barkleesanders.workers.dev/"
+    }
+  ]
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,800;1,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
