@@ -154,6 +154,16 @@ export default {
 		const url = new URL(request.url);
 		const p = url.pathname;
 
+		// Every route that MUTATES stored data is gated here, at dispatch,
+		// rather than inside its handler — see requireUploadSecret() for why
+		// (the cron calls these handlers directly, with no Request to read a
+		// header from). Read-only routes stay public: this is a public-records
+		// site and the whole point is that anyone can read it.
+		if (MUTATING_ROUTES.has(p)) {
+			const denied = requireUploadSecret(request, env);
+			if (denied) return denied;
+		}
+
 		if (p === "/api/city") return handleCity(url, env);
 		if (p === "/api/judge") return handleJudge(url, env);
 		if (p === "/api/seed") return handleSeed(url, env);
@@ -1105,18 +1115,75 @@ function isOlderThanDays(iso: string | undefined, days: number): boolean {
 	return age > days * 24 * 60 * 60 * 1000;
 }
 
+// ── Auth for write routes ──
+
+/**
+ * Every path that MUTATES stored data. Read-only routes are deliberately
+ * absent: this is a public-records site, and public reads are the product.
+ *
+ * `/api/seed` re-scrapes a city and overwrites its R2 object; `/api/enrich-bios`
+ * and `/api/process-ny-oca` each write R2 too. All three were reachable by
+ * anyone until 2026-09-03 — an anonymous caller could force a full re-scrape of
+ * every city (hammering the upstream feeds we depend on) or overwrite published
+ * judge data.
+ */
+export const MUTATING_ROUTES: ReadonlySet<string> = new Set([
+	"/api/seed",
+	"/api/enrich-bios",
+	"/api/process-ny-oca",
+	"/api/upload",
+	"/api/upload-raw",
+]);
+
+/**
+ * Compare two strings without leaking which character differed.
+ *
+ * A plain `!==` returns as soon as it finds a mismatched byte, so response
+ * timing reveals the shared secret one character at a time. The window is
+ * narrow over the public internet, but the fix is four lines and this token
+ * is the only thing standing in front of the write surface.
+ *
+ * Length is compared first and therefore still leaks — that is standard and
+ * accepted; the secret's length is not the secret.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
+}
+
+/**
+ * Bearer-token gate. Returns a 401 Response to send, or null when authorized.
+ *
+ * Called from the route dispatcher, NOT from inside each handler, because the
+ * daily cron invokes seedCity() / handleEnrichBios() / handleProcessNyOca()
+ * directly as functions — passing a synthetic `https://internal/...` URL and no
+ * Request at all. A check inside a handler would have no header to read, and
+ * making the handlers demand one would break the cron. Gating at dispatch
+ * covers exactly the HTTP surface and leaves the trusted in-process path alone.
+ */
+function requireUploadSecret(request: Request, env: Env): Response | null {
+	const authHeader = request.headers.get("Authorization") || "";
+	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+	// Fails CLOSED when UPLOAD_SECRET is unset: an unconfigured Worker must
+	// refuse writes, never fall open to anonymous ones.
+	if (!env.UPLOAD_SECRET || !timingSafeEqual(token, env.UPLOAD_SECRET)) {
+		return json({ error: "Unauthorized" }, 401);
+	}
+	return null;
+}
+
 // ── API: Direct upload to R2 (for local scrapers) ──
 async function handleUpload(
 	request: Request,
 	url: URL,
 	env: Env,
 ): Promise<Response> {
-	// Require bearer token auth
-	const authHeader = request.headers.get("Authorization") || "";
-	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-	if (!env.UPLOAD_SECRET || token !== env.UPLOAD_SECRET) {
-		return json({ error: "Unauthorized" }, 401);
-	}
+	// Auth is enforced at dispatch (MUTATING_ROUTES). Kept here as well so the
+	// handler is safe if it is ever called from a new path that forgets the gate.
+	const denied = requireUploadSecret(request, env);
+	if (denied) return denied;
 	const slug = url.searchParams.get("slug");
 	if (!slug) return json({ error: "slug required" }, 400);
 	const body = await request.text();
@@ -1550,11 +1617,10 @@ async function handleUploadRaw(
 	url: URL,
 	env: Env,
 ): Promise<Response> {
-	const authHeader = request.headers.get("Authorization") || "";
-	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-	if (!env.UPLOAD_SECRET || token !== env.UPLOAD_SECRET) {
-		return json({ error: "Unauthorized" }, 401);
-	}
+	// Auth is enforced at dispatch (MUTATING_ROUTES); repeated here for the same
+	// defence-in-depth reason as handleUpload.
+	const denied = requireUploadSecret(request, env);
+	if (denied) return denied;
 	const key = url.searchParams.get("key");
 	if (!key) return json({ error: "key required" }, 400);
 	const contentType =
