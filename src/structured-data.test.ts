@@ -15,8 +15,15 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HTML } from "./index.ts";
+import worker from "./index.ts";
 import { clientScript } from "./source-probe.ts";
+
+const HTML = await (
+	await worker.fetch(
+		new Request("https://fixture.test/"),
+		{} as Parameters<typeof worker.fetch>[1],
+	)
+).text();
 
 /** The parsed ld+json graph, or a loud failure. */
 function graph(): Record<string, unknown>[] {

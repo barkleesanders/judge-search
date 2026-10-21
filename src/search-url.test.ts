@@ -11,9 +11,15 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HTML } from "./index.ts";
+import worker from "./index.ts";
 import { bodyOf, clientScript } from "./source-probe.ts";
 
+const HTML = await (
+	await worker.fetch(
+		new Request("https://fixture.test/"),
+		{} as Parameters<typeof worker.fetch>[1],
+	)
+).text();
 const JS = clientScript(HTML);
 
 // ── syncUrl: what the address bar ends up saying ───────────────────────────

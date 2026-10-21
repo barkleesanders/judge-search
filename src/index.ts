@@ -5,6 +5,7 @@ import {
 	dedupeById,
 	isCourtWatchNonJudgeRow,
 } from "./audit.ts";
+import { MUTATING_ROUTES } from "./auth-routes.ts";
 
 // ── Types ──
 interface Env {
@@ -1142,13 +1143,6 @@ function isOlderThanDays(iso: string | undefined, days: number): boolean {
  * every city (hammering the upstream feeds we depend on) or overwrite published
  * judge data.
  */
-export const MUTATING_ROUTES: ReadonlySet<string> = new Set([
-	"/api/seed",
-	"/api/enrich-bios",
-	"/api/process-ny-oca",
-	"/api/upload",
-	"/api/upload-raw",
-]);
 
 /**
  * Compare two strings without leaking which character differed.
@@ -2850,7 +2844,7 @@ function robotsResponse(url: URL): Response {
 // ── HTML ──
 // Exported so tests can assert over the RENDERED client script (template
 // escapes already resolved) rather than the raw source text.
-export const HTML = `<!DOCTYPE html>
+const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

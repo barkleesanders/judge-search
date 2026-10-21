@@ -14,11 +14,16 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
-import worker, { MUTATING_ROUTES } from "./index.ts";
+import { mock, test } from "node:test";
+import { MUTATING_ROUTES } from "./auth-routes.ts";
+import worker from "./index.ts";
 import { bodyOf } from "./source-probe.ts";
 
 const SECRET = "test-upload-secret";
+// These checks prove auth dispatch only; provider/data ingestion is a separate contract.
+mock.method(globalThis, "fetch", () => {
+	throw new Error("Auth tests forbid external provider requests.");
+});
 
 /**
  * An R2 bucket that is simply EMPTY.
