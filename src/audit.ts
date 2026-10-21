@@ -1,0 +1,280 @@
+// ── Data-integrity audit for scraped judge rows ──
+//
+// Pure module: no Worker globals, no `fetch`, no I/O. Every export is a total
+// function over plain objects so `node --test src/audit.test.ts` can exercise
+// it with no build step and no test framework (Node >= 23 strips the types).
+//
+// This exists because the failure it guards against is SILENT. A scraper that
+// returns a mislabelled row, a duplicated row, or a row that is not a person at
+// all still returns HTTP 200 and still renders a card, so nothing downstream
+// distinguishes "the feed is clean" from "the feed is wrong". Every check below
+// reports THREE outcomes, never two: ok / violated / not-measurable.
+
+export interface AuditableJudge {
+	id: string;
+	name: string;
+	city: string;
+	court: string;
+	total_cases: number;
+	fta_count: number;
+	rearrest_count: number;
+	revocation_count: number;
+}
+
+// ── CourtWatch: rows that are not people ──
+//
+// CourtWatch.us aggregates Florida's FSS 907.043 ("Citizens Right to Know Act")
+// pretrial-release registers by grouping each county's release-judge column.
+// Bay County's register uses that column for a second purpose: when NO judge
+// authorised the release, it records the REASON instead of a name. CourtWatch's
+// GROUP BY then promotes each distinct reason string to a judge row with its own
+// id, its own case count, and its own detail page.
+//
+// There is no upstream flag separating those rows from real judges. That is a
+// measurement, not an assumption — probed live 2026-09-03:
+//
+//   * /judges exposes 8 keys and NONE is a type/role/is_judge flag.
+//   * /stats  reports {"judges":51} — CourtWatch's own headline count INCLUDES
+//     both rows, and its own UI renders all 51 unfiltered.
+//   * /cases?judge_id=<id> returns these rows' cases like any other judge's, and
+//     all 38 case-level fields have identical null/set profiles for the 2
+//     non-person rows and the 435 real Bay cases. Zero fields discriminate.
+//     (Instrument positive-controlled: an injected synthetic field IS detected,
+//     in both polarities.)
+//   * CourtListener has no entry for 47 of the 49 real judges either, so
+//     "absent from CourtListener" has 4.1% precision here — using it would
+//     delete GRAMMER, JEFCOAT, CLARK and 44 others.
+//
+// So no in-feed and no cross-source discriminator exists, and the honest
+// mechanism is this explicit two-row exclusion list.
+//
+// KEYED ON id AND EXACT NAME, BOTH MUST MATCH. Not on a name pattern: 15 real
+// Bay County judges are also stored ALL-CAPS "LAST, FIRST" (CAMPBELL, CLARK,
+// COLLIER, DYER, GAY, GRAMMER, HENRY, JEFCOAT, MALLORY, PATTERSON, REGISTER,
+// SMILEY, SMITH, STEPHENSON, VANN), so a case-based rule would delete real
+// people — measured: a bare ALL-CAPS rule flags 17 rows, 15 of them real.
+// And not on id alone: if CourtWatch renumbers, id 266 could belong to a real
+// judge. Requiring the pair means an exclusion can only fire on the exact row it
+// was written for; anything else falls through and is REPORTED by auditJudges
+// rather than dropped.
+export const CW_NON_JUDGE_ROWS: Readonly<Record<number, string>> = {
+	266: "AFFIDAVIT NOT COMPLETED AT FIRST APPEARANCE",
+	269: "BONDED PRIOR TO FIRST APPEARANCE",
+};
+
+/** True only when BOTH the upstream id and the exact name match a known
+ *  non-person row. A renumbered or renamed row returns false and survives. */
+export function isCourtWatchNonJudgeRow(id: number, name: string): boolean {
+	const known = CW_NON_JUDGE_ROWS[id];
+	return known !== undefined && known === name;
+}
+
+/** Rows whose name contains no lowercase letter AND no comma. This is a
+ *  REPORTING signal only — auditJudges surfaces it, nothing acts on it.
+ *  Measured against all 464 live rows on 2026-09-03: exactly 2 hits, both the
+ *  known non-person rows, zero false positives; the comma clause is what spares
+ *  the 15 real ALL-CAPS "LAST, FIRST" judges. Its job is to make the NEXT such
+ *  row loud instead of silent, not to decide anything. */
+export function looksNonPersonal(name: string): boolean {
+	return !/[a-z]/.test(name) && !name.includes(",");
+}
+
+export interface AuditReport {
+	slug: string;
+	ok: boolean;
+	errors: string[];
+	warnings: string[];
+	/** Checks that could not be run at all, e.g. because the feed supplied no
+	 *  jurisdiction to compare the court string against. Never counted as a
+	 *  pass — an unmeasured check is its own outcome. */
+	unmeasured: string[];
+	stats: {
+		rows: number;
+		duplicate_ids: number;
+		duplicate_name_city: number;
+		non_personal_names: number;
+		jurisdiction_checked: number;
+	};
+}
+
+export interface AuditOptions {
+	/** Returns the jurisdiction the feed itself reported for a row (e.g. the
+	 *  county), or undefined when the feed carries none. When present, the row's
+	 *  `court` string must mention it — the check that would have caught 33
+	 *  Florida judges labelled with a county they do not sit in.
+	 *
+	 *  ⚠️ MUST NOT be derived from `row.court`. The value being checked cannot
+	 *  also be the source of what it is checked against; that comparison is a
+	 *  tautology that passes unconditionally. This is not hypothetical — the
+	 *  first wiring of this option parsed the county back out of `row.court`,
+	 *  and an injected `court = "Circuit Court, Orange County, FL"` on every row
+	 *  scored a clean pass and published 49 mislabelled judges. It was caught
+	 *  only by injecting the bug end-to-end and watching what got stored, which
+	 *  is why that control is part of the release procedure and not optional.
+	 *  Read the upstream field (the feed's own `county`, carried by id). */
+	jurisdictionOf?: (row: AuditableJudge) => string | undefined;
+}
+
+/**
+ * Assert the invariants a published set of judge rows must satisfy.
+ *
+ * ERRORS are conditions that make the site state something false about a real
+ * person, or that make two people indistinguishable. WARNINGS are conditions a
+ * human must adjudicate and that must never be auto-"fixed" — two rows sharing
+ * a name may be one duplicated person or two different people, and both merging
+ * their counts and deleting one would be a fabrication.
+ */
+export function auditJudges(
+	slug: string,
+	rows: readonly AuditableJudge[],
+	opts: AuditOptions = {},
+): AuditReport {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	const unmeasured: string[] = [];
+
+	// (a) Duplicate ids. An id is the deep-link key, so a collision makes two
+	//     rows literally unaddressable apart.
+	const byId = new Map<string, number>();
+	for (const r of rows) byId.set(r.id, (byId.get(r.id) ?? 0) + 1);
+	let duplicateIds = 0;
+	for (const [id, n] of byId) {
+		if (n > 1) {
+			duplicateIds += n - 1;
+			errors.push(`duplicate id ${id} appears ${n}x`);
+		}
+	}
+
+	// (b) Duplicate name+city. Surfaced, never auto-resolved.
+	const byNameCity = new Map<
+		string,
+		{ n: number; name: string; city: string }
+	>();
+	for (const r of rows) {
+		const k = `${r.name}\u0000${r.city}`;
+		const cur = byNameCity.get(k);
+		if (cur) cur.n++;
+		else byNameCity.set(k, { n: 1, name: r.name, city: r.city });
+	}
+	let duplicateNameCity = 0;
+	for (const v of byNameCity.values()) {
+		if (v.n > 1) {
+			duplicateNameCity += v.n - 1;
+			warnings.push(
+				`"${v.name}" appears ${v.n}x in ${v.city} under different ids — ` +
+					"could be one duplicated record or two people with the same name; " +
+					"needs a human, do not merge or drop",
+			);
+		}
+	}
+
+	// (c) The court string must name the jurisdiction the feed itself reported.
+	let jurisdictionChecked = 0;
+	if (opts.jurisdictionOf) {
+		let sawAny = false;
+		for (const r of rows) {
+			const j = opts.jurisdictionOf(r);
+			if (!j) continue;
+			sawAny = true;
+			jurisdictionChecked++;
+			if (!r.court.toLowerCase().includes(j.toLowerCase())) {
+				errors.push(
+					`${r.id} "${r.name}": feed says jurisdiction "${j}" but court reads "${r.court}"`,
+				);
+			}
+		}
+		if (!sawAny) unmeasured.push("no row carried a jurisdiction to compare");
+	} else {
+		unmeasured.push("no jurisdictionOf() supplied for this scraper");
+	}
+
+	// (d) Structurally unusable rows.
+	for (const r of rows) {
+		if (!r.id || !r.name.trim()) {
+			errors.push(
+				`row with blank id or name: ${JSON.stringify(r).slice(0, 120)}`,
+			);
+			continue;
+		}
+		const counts: ReadonlyArray<readonly [string, number]> = [
+			["total_cases", r.total_cases],
+			["fta_count", r.fta_count],
+			["rearrest_count", r.rearrest_count],
+			["revocation_count", r.revocation_count],
+		];
+		for (const [field, v] of counts) {
+			if (!Number.isFinite(v) || v < 0)
+				errors.push(`${r.id} "${r.name}": ${field} is ${v}`);
+		}
+		for (const [field, v] of counts.slice(1)) {
+			if (
+				Number.isFinite(v) &&
+				Number.isFinite(r.total_cases) &&
+				v > r.total_cases
+			)
+				errors.push(
+					`${r.id} "${r.name}": ${field}=${v} exceeds total_cases=${r.total_cases}`,
+				);
+		}
+	}
+
+	// (e) Non-person-shaped names, reported only.
+	const nonPersonal = rows.filter((r) => looksNonPersonal(r.name));
+	for (const r of nonPersonal) {
+		warnings.push(
+			`${r.id} "${r.name}" does not look like a person's name — ` +
+				"verify it is a judge before it is published",
+		);
+	}
+
+	return {
+		slug,
+		ok: errors.length === 0,
+		errors,
+		warnings,
+		unmeasured,
+		stats: {
+			rows: rows.length,
+			duplicate_ids: duplicateIds,
+			duplicate_name_city: duplicateNameCity,
+			non_personal_names: nonPersonal.length,
+			jurisdiction_checked: jurisdictionChecked,
+		},
+	};
+}
+
+/**
+ * Collapse rows that share an id.
+ *
+ * An id must be unique, so a collision is always resolved — but HOW it is
+ * resolved is reported. Byte-identical twins (the live `cl-14533` case) are a
+ * plain duplicated row and collapse silently. A collision whose rows DIFFER is a
+ * different and worse bug: the first is kept so ids stay unique, and the
+ * conflict is returned so the caller fails loudly instead of silently picking a
+ * version of a real person's record.
+ */
+export function dedupeById<T extends AuditableJudge>(
+	rows: readonly T[],
+): { rows: T[]; identicalDropped: number; conflicts: string[] } {
+	const seen = new Map<string, T>();
+	const out: T[] = [];
+	const conflicts: string[] = [];
+	let identicalDropped = 0;
+
+	for (const r of rows) {
+		const prev = seen.get(r.id);
+		if (!prev) {
+			seen.set(r.id, r);
+			out.push(r);
+			continue;
+		}
+		if (JSON.stringify(prev) === JSON.stringify(r)) {
+			identicalDropped++;
+		} else {
+			conflicts.push(
+				`id ${r.id} reused by rows that differ ("${prev.name}" vs "${r.name}") — kept the first`,
+			);
+		}
+	}
+	return { rows: out, identicalDropped, conflicts };
+}

@@ -1,3 +1,12 @@
+import {
+	type AuditableJudge,
+	type AuditReport,
+	auditJudges,
+	dedupeById,
+	isCourtWatchNonJudgeRow,
+} from "./audit.ts";
+import { MUTATING_ROUTES } from "./auth-routes.ts";
+
 // ── Types ──
 interface Env {
 	DATA: R2Bucket;
@@ -66,20 +75,79 @@ interface CityData {
 	city_stats?: CityStats; // city-wide aggregates when per-judge data unavailable
 }
 
+// A single row of the global cross-city judge index. Deliberately LEAN: this
+// payload is fetched by every visitor who uses the name search, so it carries
+// only what the search UI and the A–Z page render — no bios, no education
+// arrays, no CourtListener blobs. `slug` is the city slug (courts/<slug>.json),
+// which is what the deep link needs to reload that judge's city.
+interface JudgeIndexEntry {
+	id: string;
+	name: string;
+	city: string;
+	state: string;
+	slug: string;
+	court: string;
+	total_cases: number;
+	fta_count: number;
+	rearrest_count: number;
+	revocation_count: number;
+	position_type?: string;
+}
+
+interface JudgeIndex {
+	count: number;
+	cities: number;
+	// R2 keys that could not be parsed this build. Normally empty; a non-empty
+	// list is why `count` is lower than expected, instead of leaving the caller
+	// to guess whether judges were lost or never existed.
+	unreadable: string[];
+	generated_at: string;
+	judges: JudgeIndexEntry[];
+}
+
 // ── Config ──
 const CL = "https://www.courtlistener.com/api/rest/v4";
 const CW = "https://courtwatch.us/.netlify/functions";
 
-const CITIES: Record<string, { state: string; searchTerm: string }> = {
+// `label` is the human-readable name. It is separate from the slug because the
+// slug is load-bearing — it is the R2 key (courts/<slug>.json) and the deep-link
+// parameter — so a slug that turned out to be factually wrong is corrected in
+// the label rather than renamed, which would orphan stored data and break every
+// existing link. Where `label` is omitted the slug is title-cased as before.
+const CITIES: Record<
+	string,
+	{ state: string; searchTerm: string; label?: string }
+> = {
 	"san-francisco": { state: "California", searchTerm: "California" },
 	"new-york": { state: "New York", searchTerm: "New York" },
 	chicago: { state: "Illinois", searchTerm: "Illinois" },
 	atlanta: { state: "Georgia", searchTerm: "Georgia" },
-	miami: { state: "Florida", searchTerm: "Florida" },
+	// The CourtWatch feed behind this slug covers four Florida counties and none
+	// of them is Miami-Dade (measured 2026-09-03: Orange 18, Bay 17, Osceola 10,
+	// Monroe 6). The label must stay true as that set changes, so it names the
+	// state and lets each judge's own row carry the county.
+	miami: { state: "Florida", searchTerm: "Florida", label: "Florida" },
 	seattle: { state: "Washington", searchTerm: "Washington" },
-	texas: { state: "Texas", searchTerm: "Texas" },
+	// Harris County, i.e. Houston — the slug is a state name for historical
+	// reasons; only the display label is corrected.
+	texas: { state: "Texas", searchTerm: "Texas", label: "Houston" },
 	"los-angeles": { state: "California", searchTerm: "California" },
 };
+
+// The site's design tokens, declared ONCE. Both the homepage template and the
+// server-rendered /judges page interpolate this, so the two pages cannot drift
+// into different palettes.
+const CSS_TOKENS = `:root{
+  --bg:#0a0a0a;--s:#111;--s2:#161616;--s3:#1c1c1c;
+  --b:#222;--b2:#333;
+  --t:#f0ece4;--t2:#a09a8c;--t3:#6b6560;
+  --gold:#c8a84b;--gold2:#e0c96a;--gg:rgba(200,168,75,.12);
+  --red:#e84040;--orange:#f0883e;--green:#34d399;
+  --serif:'Playfair Display',Georgia,serif;
+  --sans:'IBM Plex Sans',-apple-system,system-ui,sans-serif;
+  --mono:'IBM Plex Mono','SF Mono',monospace;
+  --r:8px;
+}`;
 
 // ── Worker entry ──
 export default {
@@ -87,10 +155,22 @@ export default {
 		const url = new URL(request.url);
 		const p = url.pathname;
 
+		// Every route that MUTATES stored data is gated here, at dispatch,
+		// rather than inside its handler — see requireUploadSecret() for why
+		// (the cron calls these handlers directly, with no Request to read a
+		// header from). Read-only routes stay public: this is a public-records
+		// site and the whole point is that anyone can read it.
+		if (MUTATING_ROUTES.has(p)) {
+			const denied = requireUploadSecret(request, env);
+			if (denied) return denied;
+		}
+
 		if (p === "/api/city") return handleCity(url, env);
 		if (p === "/api/judge") return handleJudge(url, env);
 		if (p === "/api/seed") return handleSeed(url, env);
 		if (p === "/api/cities") return handleCities(env);
+		if (p === "/api/judges") return handleJudgesIndex(env);
+		if (p === "/judges") return handleJudgesPage(env);
 		if (p === "/api/worst") return handleWorst(url, env);
 		if (p === "/api/status") return handleStatus(env);
 		if (p === "/api/enrich-bios") return handleEnrichBios(url, env);
@@ -99,6 +179,21 @@ export default {
 		if (p === "/api/upload-raw" && request.method === "POST")
 			return handleUploadRaw(request, url, env);
 		if (p === "/api/process-ny-oca") return handleProcessNyOca(url, env);
+
+		// Crawler + disclosure files. These MUST be matched before the catch-all:
+		// until 2026-09-04 every one of them fell through to htmlResponse(HTML), so
+		// /robots.txt and /sitemap.xml answered 200 with 87 KB of text/html — a
+		// crawler asking for robots got a web page, and a sitemap submitted to
+		// Search Console would not parse. Measured against production that day.
+		if (p === "/robots.txt") return robotsResponse(url);
+		if (p === "/sitemap.xml") return sitemapResponse(url);
+		// RFC 9116 documents BOTH paths; only the well-known one is authoritative,
+		// so the short path redirects rather than duplicating the file.
+		if (p === "/security.txt")
+			return Response.redirect(
+				new URL("/.well-known/security.txt", url).toString(),
+				301,
+			);
 
 		// Static assets from R2
 		if (p === "/favicon.png" || p === "/favicon.svg" || p === "/og-image.png") {
@@ -115,24 +210,7 @@ export default {
 			}
 		}
 
-		return new Response(HTML, {
-			headers: {
-				"content-type": "text/html;charset=utf-8",
-				// Production baseline (2026-07-06, /ship 4.05b): explicit cache
-				// policy (public judge data; with Workers Cache enabled, hits skip
-				// the Worker) + security headers. CSP allow-list is exactly what
-				// the page loads: Leaflet from unpkg, Google Fonts, CartoDB dark
-				// basemap tiles; inline style/script blocks are part of the
-				// single-file HTML.
-				"cache-control": "public, max-age=300, stale-while-revalidate=3600",
-				"content-security-policy":
-					"default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
-				"x-content-type-options": "nosniff",
-				"x-frame-options": "DENY",
-				"referrer-policy": "strict-origin-when-cross-origin",
-				"permissions-policy": "camera=(), microphone=(), geolocation=()",
-			},
-		});
+		return htmlResponse(HTML);
 	},
 
 	async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
@@ -279,14 +357,14 @@ async function handleJudge(url: URL, env: Env): Promise<Response> {
 
 // ── API: List all seeded cities ──
 async function handleCities(env: Env): Promise<Response> {
-	const list = await env.DATA.list({ prefix: "courts/" });
+	const keys = await listCourtKeys(env);
 	const cities = [];
-	for (const obj of list.objects) {
-		const data = await env.DATA.get(obj.key);
+	for (const key of keys) {
+		const data = await env.DATA.get(key);
 		if (data) {
 			const parsed = JSON.parse(await data.text()) as CityData;
 			cities.push({
-				slug: obj.key.replace("courts/", "").replace(".json", ""),
+				slug: key.replace("courts/", "").replace(".json", ""),
 				city: parsed.city,
 				state: parsed.state,
 				judges: parsed.judges.length,
@@ -300,6 +378,330 @@ async function handleCities(env: Env): Promise<Response> {
 		}
 	}
 	return json(cities);
+}
+
+// Every route this Worker serves is public, unauthenticated judge data — no
+// cookies, no per-user content — so a shared/edge cache is correct. It is also
+// REQUIRED to state it: `[cache] enabled = true` in wrangler.toml means a 200
+// with NO cache-control gets heuristically cached ~2h anyway, at a TTL nobody
+// chose. Matches the homepage policy.
+const PUBLIC_CACHE = "public, max-age=300, stale-while-revalidate=3600";
+
+// Shared security + cache headers for every server-rendered HTML page, so the
+// homepage and /judges cannot drift apart. CSP allow-list is exactly what the
+// pages load: Leaflet from unpkg, Google Fonts, and OpenStreetMap raster tiles
+// (was CARTO until 2026-09-03 — see the tileLayer comment); inline style/script
+// blocks are part of the single-file HTML.
+//
+// The img-src host here and the L.tileLayer() URL are ONE fact in two places.
+// Changing either alone is silent: a tile host missing from img-src is blocked
+// with no server-side error and the map renders blank.
+function htmlResponse(body: string, status = 200): Response {
+	return new Response(body, {
+		status,
+		headers: {
+			"content-type": "text/html;charset=utf-8",
+			"cache-control": PUBLIC_CACHE,
+			"content-security-policy":
+				"default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tile.openstreetmap.org https://unpkg.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+			"x-content-type-options": "nosniff",
+			"x-frame-options": "DENY",
+			"referrer-policy": "strict-origin-when-cross-origin",
+			"permissions-policy": "camera=(), microphone=(), geolocation=()",
+			// workers.dev is on the HSTS preload list, so browsers already force
+			// HTTPS here — but the header is what a scanner reads, and it is what
+			// keeps this correct if the worker is ever bound to a custom domain,
+			// where nothing else would enforce it.
+			"strict-transport-security":
+				"max-age=31536000; includeSubDomains; preload",
+		},
+	});
+}
+
+// R2's list() caps a page at 1000 keys (ceiling: R2 API max per request) and
+// reports the shortfall only via `truncated`. Ignoring the cursor is the silent
+// kind of wrong: a truncated page reads exactly like "that is all the cities".
+// 9 objects today, so this loop runs once — it exists so the cliff at 1000 is
+// never reached rather than never noticed.
+async function listCourtKeys(env: Env): Promise<string[]> {
+	const keys: string[] = [];
+	let cursor: string | undefined;
+	for (;;) {
+		const page = await env.DATA.list({ prefix: "courts/", cursor });
+		for (const obj of page.objects) keys.push(obj.key);
+		if (!page.truncated) return keys;
+		cursor = page.cursor;
+	}
+}
+
+// ── Global judge index ──
+// Reads every courts/<slug>.json once and flattens them into one lean list.
+// That is 8–9 R2 GETs, so this must never run per-keystroke: the client fetches
+// /api/judges ONCE and filters in memory, and both this endpoint and the /judges
+// page carry PUBLIC_CACHE so the edge absorbs repeat traffic.
+//
+// Cities whose judges array is empty are dropped. That is a rule, not a
+// hardcoded slug list: it is what excludes the `test-check` placeholder bucket
+// without pinning the code to that name (a future empty bucket drops too).
+async function buildJudgeIndex(env: Env): Promise<JudgeIndex> {
+	const keys = await listCourtKeys(env);
+	const judges: JudgeIndexEntry[] = [];
+	const unreadable: string[] = [];
+	let cities = 0;
+
+	for (const key of keys) {
+		const data = await env.DATA.get(key);
+		if (!data) continue;
+		// One malformed object must not 500 the whole index — but it must not
+		// vanish silently either, or a shrunken index reads as "fewer judges".
+		let parsed: CityData;
+		try {
+			parsed = JSON.parse(await data.text()) as CityData;
+		} catch (e) {
+			console.log("[judge-index] unreadable object", key, String(e));
+			unreadable.push(key);
+			continue;
+		}
+		if (!Array.isArray(parsed.judges) || parsed.judges.length === 0) continue;
+		cities++;
+		const slug = key.replace("courts/", "").replace(".json", "");
+		for (const j of parsed.judges) {
+			judges.push({
+				id: j.id,
+				name: j.name,
+				city: j.city || parsed.city,
+				state: j.state || parsed.state,
+				slug,
+				court: j.court,
+				total_cases: j.total_cases,
+				fta_count: j.fta_count,
+				rearrest_count: j.rearrest_count,
+				revocation_count: j.revocation_count,
+				position_type: j.position_type,
+			});
+		}
+	}
+
+	// Ids must be unique across the whole index — it is the deep-link key, so a
+	// collision makes two rows unaddressable apart. Deduping here as well as at
+	// write time means an id collision already sitting in R2 (the live
+	// `cl-14533` case) is corrected on read, without waiting for a reseed.
+	const deduped = dedupeById(judges);
+	if (deduped.identicalDropped)
+		console.log(
+			`[judge-index] collapsed ${deduped.identicalDropped} byte-identical duplicate row(s)`,
+		);
+	for (const c of deduped.conflicts) console.log(`[judge-index] ERROR: ${c}`);
+
+	const out = deduped.rows;
+	out.sort((a, b) => sortKey(a.name).localeCompare(sortKey(b.name)));
+	return {
+		count: out.length,
+		cities,
+		unreadable,
+		generated_at: new Date().toISOString(),
+		judges: out,
+	};
+}
+
+// Split a stored name into surname + the rest, for A–Z filing and sorting.
+// Names carry a "Judge "/"Hon." prefix, and the upstream feeds use TWO orders
+// that have to be handled separately:
+//   "Judge Linda Colfax"      (SF, Miami, …) → surname is the LAST word
+//   "Judge Bondy, Matthew A." (NY OCA)       → surname is everything BEFORE the comma
+// Measured 2026-09-03 against the live data: 231 of 464 names (49%) are the
+// comma form, and treating their last word as the surname filed 215 judges
+// (46%) under the wrong letter — New York's middle initials piled up under "A".
+// A trailing initial or generational suffix is never the surname either.
+const NAME_PREFIX =
+	/^(the\s+)?(hon(ourable|orable)?\.?|judge|justice|magistrate|commissioner)\s+/i;
+const NAME_SUFFIX = /^(jr|sr|ii|iii|iv|v|esq)\.?$/i;
+const NAME_INITIAL = /^[a-z]\.?$/i;
+
+function nameParts(fullName: string): { last: string; rest: string } {
+	const bare = (fullName || "").replace(NAME_PREFIX, "").trim();
+
+	const comma = bare.indexOf(",");
+	if (comma > 0) {
+		return {
+			last: bare.slice(0, comma).trim(),
+			rest: bare.slice(comma + 1).trim(),
+		};
+	}
+
+	// ceiling: surname particles are not joined, so "Christine Van Aken" files
+	// under A rather than V. Measured 2026-09-03: exactly 1 of 464 names. A
+	// particle list (van/von/de/della/mac/o') would fix it and would also start
+	// misfiling anyone whose real surname begins with one, so it is not worth it
+	// at n=1 — revisit if a feed lands with many Dutch/Italian/Spanish surnames.
+	const words = bare.split(/\s+/).filter(Boolean);
+	while (
+		words.length > 1 &&
+		(NAME_SUFFIX.test(words[words.length - 1]) ||
+			NAME_INITIAL.test(words[words.length - 1]))
+	) {
+		words.pop();
+	}
+	if (words.length === 0) return { last: "", rest: "" };
+	return { last: words[words.length - 1], rest: words.slice(0, -1).join(" ") };
+}
+
+function sortKey(fullName: string): string {
+	const { last, rest } = nameParts(fullName);
+	return `${last} ${rest}`.trim().toLowerCase();
+}
+
+// A–Z bucket for the index page. Anything not starting with a letter (rare, but
+// upstream data is upstream data) lands in "#" rather than vanishing.
+function alphaBucket(fullName: string): string {
+	const c = nameParts(fullName).last.charAt(0).toUpperCase();
+	return c >= "A" && c <= "Z" ? c : "#";
+}
+
+async function handleJudgesIndex(env: Env): Promise<Response> {
+	const index = await buildJudgeIndex(env);
+	return new Response(JSON.stringify(index), {
+		headers: {
+			"content-type": "application/json",
+			"cache-control": PUBLIC_CACHE,
+			"access-control-allow-origin": "*",
+		},
+	});
+}
+
+function escapeHtml(s: string): string {
+	return String(s ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+// Canonical shareable deep link for one judge. ONE scheme, used by the /judges
+// page, the search dropdown, and the homepage's on-load handler.
+function judgeHref(j: JudgeIndexEntry): string {
+	return `/?judge=${encodeURIComponent(j.id)}&city=${encodeURIComponent(j.slug)}`;
+}
+
+// ── Server-rendered A–Z judge index at /judges ──
+// The point of this page is that it works with JavaScript OFF and is crawlable:
+// a judge's name has to be findable from a search engine, which the SPA-ish
+// homepage can never deliver because its judge list only exists after a fetch.
+async function handleJudgesPage(env: Env): Promise<Response> {
+	const index = await buildJudgeIndex(env);
+
+	const buckets = new Map<string, JudgeIndexEntry[]>();
+	for (const j of index.judges) {
+		const k = alphaBucket(j.name);
+		const arr = buckets.get(k);
+		if (arr) arr.push(j);
+		else buckets.set(k, [j]);
+	}
+	const letters = [...buckets.keys()].sort((a, b) =>
+		a === "#" ? 1 : b === "#" ? -1 : a.localeCompare(b),
+	);
+
+	const nav = letters
+		.map((L) => `<a href="#L-${escapeHtml(L)}">${escapeHtml(L)}</a>`)
+		.join("");
+
+	const sections = letters
+		.map((L) => {
+			const rows = (buckets.get(L) ?? [])
+				.map((j) => {
+					const cases =
+						j.total_cases > 0
+							? `<span class="ji-cases">${j.total_cases.toLocaleString("en-US")} cases</span>`
+							: '<span class="ji-cases ji-none">no case data</span>';
+					return (
+						'<li class="ji-row">' +
+						`<a class="ji-name" href="${escapeHtml(judgeHref(j))}">${escapeHtml(j.name)}</a>` +
+						`<span class="ji-meta">${escapeHtml(j.court)} &middot; ${escapeHtml(j.city)}, ${escapeHtml(j.state)}</span>` +
+						cases +
+						"</li>"
+					);
+				})
+				.join("");
+			return (
+				`<section class="ji-sec" id="L-${escapeHtml(L)}">` +
+				`<h2>${escapeHtml(L)}</h2><ul class="ji-list">${rows}</ul></section>`
+			);
+		})
+		.join("");
+
+	const total = index.count.toLocaleString("en-US");
+	const body = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>All ${total} Judges A–Z — JudgeSearch</title>
+<meta name="description" content="Complete A–Z index of all ${total} judges on JudgeSearch, across ${index.cities} U.S. cities. Public court records: total cases, missed court dates, rearrests, and release revocations.">
+<link rel="canonical" href="https://judge-search.barkleesanders.workers.dev/judges">
+<meta name="theme-color" content="#c8a84b">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+<meta property="og:site_name" content="JudgeSearch">
+<meta property="og:title" content="All ${total} Judges A–Z — JudgeSearch">
+<meta property="og:description" content="Complete A–Z index of every judge on JudgeSearch, across ${index.cities} U.S. cities.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://judge-search.barkleesanders.workers.dev/judges">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,800;1,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+${CSS_TOKENS}
+body{font-family:var(--sans);background:var(--bg);color:var(--t);line-height:1.6;min-height:100vh}
+a{color:var(--gold);text-decoration:none}a:hover{color:var(--gold2)}
+nav{position:sticky;top:0;z-index:50;background:rgba(10,10,10,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--b);padding:14px 0}
+.ni{max-width:1000px;margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{font-family:var(--serif);font-size:1.4rem;font-weight:800}.logo span{color:var(--gold)}
+.nl{display:flex;gap:20px}.nl a{font-family:var(--mono);font-size:.8rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em}
+.ji-wrap{max-width:1000px;margin:0 auto;padding:0 24px 60px}
+.ji-hero{text-align:center;padding:48px 24px 28px;border-bottom:1px solid var(--b)}
+.ji-hero h1{font-family:var(--serif);font-size:2.2rem;font-weight:800;line-height:1.2;margin-bottom:10px}
+.ji-hero h1 em{font-style:italic;color:var(--gold)}
+.ji-hero p{color:var(--t2);font-size:1rem;max-width:620px;margin:0 auto}
+.ji-alpha{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:26px auto 30px;max-width:760px}
+.ji-alpha a{display:inline-block;min-width:34px;text-align:center;padding:6px 8px;background:var(--s);border:1px solid var(--b);border-radius:var(--r);font-family:var(--mono);font-size:.8rem;color:var(--t2)}
+.ji-alpha a:hover{border-color:var(--gold);color:var(--gold);background:var(--gg)}
+.ji-sec{margin-bottom:34px;scroll-margin-top:80px}
+.ji-sec h2{font-family:var(--serif);font-size:1.5rem;font-weight:800;color:var(--gold);padding-bottom:8px;border-bottom:1px solid var(--b);margin-bottom:6px}
+.ji-list{list-style:none}
+.ji-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:10px 4px;border-bottom:1px solid var(--b)}
+.ji-name{font-weight:600;color:var(--t);font-size:.98rem}
+.ji-row:hover{background:var(--s2)}
+.ji-row:hover .ji-name{color:var(--gold)}
+.ji-meta{color:var(--t2);font-size:.82rem;flex:1;min-width:180px}
+.ji-cases{font-family:var(--mono);font-size:.75rem;color:var(--t3);white-space:nowrap}
+.ji-cases.ji-none{opacity:.6}
+footer{text-align:center;padding:40px 24px;border-top:1px solid var(--b);color:var(--t3);font-size:.8rem;font-family:var(--mono)}
+footer a{color:var(--gold)}
+@media(max-width:700px){
+  .ji-hero{padding:30px 16px 22px}.ji-hero h1{font-size:1.55rem}
+  .ji-wrap{padding:0 14px 40px}.ni{padding:0 14px}
+  .ji-meta{width:100%;flex:none}
+}
+</style>
+</head>
+<body>
+<nav><div class="ni"><div class="logo"><a href="/" style="color:inherit">Judge<span>Search</span>.us</a></div><div class="nl"><a href="/">Home</a><a href="/#worst50" style="color:var(--red)">Worst 50</a><a href="/#method">About</a></div></div></nav>
+<header class="ji-hero">
+<h1>All ${total} judges, <em>A to Z</em></h1>
+<p>Every judge on JudgeSearch across ${index.cities} U.S. cities, sorted by last name. Select any name to open their city record.</p>
+</header>
+<div class="ji-wrap">
+<nav class="ji-alpha" aria-label="Jump to letter">${nav}</nav>
+${sections}
+</div>
+<footer>
+<p>Public court data &middot; <a href="/">Search by name</a> &middot; <a href="/#method">About</a> &middot; <a href="/#sources">Sources</a> &middot; <a href="https://github.com/barkleesanders/judge-search" target="_blank" rel="noopener">Source code</a></p>
+<p style="margin-top:8px;font-size:.72rem;color:var(--t3)">Not legal advice. All data is public record. &copy; 2025 JudgeSearch</p>
+</footer>
+</body>
+</html>`;
+	return htmlResponse(body);
 }
 
 // ── API: Worst judges in America ──
@@ -436,7 +838,15 @@ async function handleSeed(url: URL, env: Env): Promise<Response> {
 	}
 
 	const data = await seedCity(slug, env);
-	if (!data) return json({ error: "Unknown city" }, 404);
+	if (!data)
+		return json(
+			{
+				error: CITIES[slug]
+					? "Refresh produced no publishable data — it failed the integrity audit and there is no known-good data to fall back to. See the [audit] Worker logs."
+					: "Unknown city",
+			},
+			CITIES[slug] ? 409 : 404,
+		);
 	return json({ seeded: slug, judges: data.judges.length });
 }
 
@@ -463,15 +873,22 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 	// Load existing data first — the floor we refuse to fall below
 	const existing = await loadExisting(slug, env);
 
-	const cityName = slug
-		.split("-")
-		.map((w) => w[0].toUpperCase() + w.slice(1))
-		.join(" ");
+	const cityName =
+		conf.label ??
+		slug
+			.split("-")
+			.map((w) => w[0].toUpperCase() + w.slice(1))
+			.join(" ");
 	let judges: JudgeRecord[] = [];
 	let source = "CourtListener (Free Law Project)";
 	let metric_labels: MetricLabels | undefined;
 	let city_stats: CityStats | undefined;
 	let scrapeErr: unknown = null;
+	// Set by scrapers that can report the jurisdiction the feed itself gave for
+	// each row, so the audit can check the court label against it. Typed on
+	// AuditableJudge (not JudgeRecord) so it may only read the fields the audit
+	// contract guarantees.
+	let jurisdictionOf: ((row: AuditableJudge) => string | undefined) | undefined;
 
 	// Dispatch to city-specific scrapers — wrap in try/catch so a failed
 	// scraper never wipes R2 data.
@@ -481,6 +898,13 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 			judges = r.judges;
 			source = r.source;
 			metric_labels = r.metric_labels;
+			if (r.excluded.length)
+				console.log(
+					`[audit] ${slug}: excluded ${r.excluded.length} known non-person row(s): ${r.excluded.join(", ")}`,
+				);
+			// The county as the FEED reported it, looked up by id. Independent of
+			// the court label, which is what makes the comparison a real check.
+			jurisdictionOf = (row) => r.jurisdictions[row.id];
 			await enrichBiosFromCL(judges, "Florida", env.COURTLISTENER_TOKEN);
 		} else if (slug === "chicago") {
 			const r = await scrapeChicago(cityName);
@@ -566,6 +990,40 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 		judges = [];
 	}
 
+	// ── Integrity gate ──
+	// Runs for EVERY city on EVERY seed, whatever the scraper. An id collision
+	// makes two people unaddressable apart, so it is always resolved here; a
+	// collision between rows that DIFFER is reported rather than silently
+	// resolved, because picking a version of a real person's record is a claim.
+	const deduped = dedupeById(judges);
+	if (deduped.identicalDropped)
+		console.log(
+			`[audit] ${slug}: collapsed ${deduped.identicalDropped} byte-identical duplicate row(s)`,
+		);
+	judges = deduped.rows;
+
+	const report = auditJudges(slug, judges, { jurisdictionOf });
+	logAudit(report, deduped.conflicts);
+	// A failed invariant is treated exactly like a failed scrape: fall through to
+	// the protective merge below, which keeps the last known-good data rather
+	// than publishing something we have just proved is wrong.
+	const auditFailed = !report.ok || deduped.conflicts.length > 0;
+	if (auditFailed && !scrapeErr)
+		scrapeErr = new Error("integrity audit failed");
+
+	// COLD START: the protective merge below can only protect data that already
+	// exists. On a first-ever seed there is nothing to fall back to, so without
+	// this the audit would report the violation and then publish it anyway —
+	// the exact silent-publish the gate exists to prevent. Publishing nothing is
+	// the correct outcome: an empty city is visibly missing, a mislabelled one
+	// is not.
+	if (auditFailed && !(existing && existing.total_cases > 0)) {
+		console.log(
+			`[audit] ${slug}: REFUSING to publish — audit failed and there is no known-good data to fall back to`,
+		);
+		return existing;
+	}
+
 	const newTotalCases = judges.reduce((s, j) => s + j.total_cases, 0);
 
 	// PROTECTIVE MERGE: if existing data has more cases, keep it.
@@ -637,6 +1095,26 @@ async function seedCity(slug: string, env: Env): Promise<CityData | null> {
 	return cityData;
 }
 
+// Emit an audit report to the Worker log. Always logs a line, including on a
+// clean pass — a gate that only speaks when it fails is indistinguishable from
+// a gate that has stopped running.
+function logAudit(report: AuditReport, conflicts: string[] = []): void {
+	const s = report.stats;
+	console.log(
+		`[audit] ${report.slug}: ${report.ok && !conflicts.length ? "OK" : "FAILED"} ` +
+			`rows=${s.rows} dup_ids=${s.duplicate_ids} dup_name_city=${s.duplicate_name_city} ` +
+			`non_personal=${s.non_personal_names} jurisdiction_checked=${s.jurisdiction_checked}`,
+	);
+	for (const e of report.errors)
+		console.log(`[audit] ${report.slug} ERROR: ${e}`);
+	for (const c of conflicts) console.log(`[audit] ${report.slug} ERROR: ${c}`);
+	for (const w of report.warnings)
+		console.log(`[audit] ${report.slug} WARN: ${w}`);
+	// Unmeasured is its own outcome and is never folded into the pass.
+	for (const u of report.unmeasured)
+		console.log(`[audit] ${report.slug} UNMEASURED: ${u}`);
+}
+
 async function loadExisting(slug: string, env: Env): Promise<CityData | null> {
 	const obj = await env.DATA.get(`courts/${slug}.json`);
 	if (!obj) return null;
@@ -653,18 +1131,68 @@ function isOlderThanDays(iso: string | undefined, days: number): boolean {
 	return age > days * 24 * 60 * 60 * 1000;
 }
 
+// ── Auth for write routes ──
+
+/**
+ * Every path that MUTATES stored data. Read-only routes are deliberately
+ * absent: this is a public-records site, and public reads are the product.
+ *
+ * `/api/seed` re-scrapes a city and overwrites its R2 object; `/api/enrich-bios`
+ * and `/api/process-ny-oca` each write R2 too. All three were reachable by
+ * anyone until 2026-09-03 — an anonymous caller could force a full re-scrape of
+ * every city (hammering the upstream feeds we depend on) or overwrite published
+ * judge data.
+ */
+
+/**
+ * Compare two strings without leaking which character differed.
+ *
+ * A plain `!==` returns as soon as it finds a mismatched byte, so response
+ * timing reveals the shared secret one character at a time. The window is
+ * narrow over the public internet, but the fix is four lines and this token
+ * is the only thing standing in front of the write surface.
+ *
+ * Length is compared first and therefore still leaks — that is standard and
+ * accepted; the secret's length is not the secret.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
+}
+
+/**
+ * Bearer-token gate. Returns a 401 Response to send, or null when authorized.
+ *
+ * Called from the route dispatcher, NOT from inside each handler, because the
+ * daily cron invokes seedCity() / handleEnrichBios() / handleProcessNyOca()
+ * directly as functions — passing a synthetic `https://internal/...` URL and no
+ * Request at all. A check inside a handler would have no header to read, and
+ * making the handlers demand one would break the cron. Gating at dispatch
+ * covers exactly the HTTP surface and leaves the trusted in-process path alone.
+ */
+function requireUploadSecret(request: Request, env: Env): Response | null {
+	const authHeader = request.headers.get("Authorization") || "";
+	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+	// Fails CLOSED when UPLOAD_SECRET is unset: an unconfigured Worker must
+	// refuse writes, never fall open to anonymous ones.
+	if (!env.UPLOAD_SECRET || !timingSafeEqual(token, env.UPLOAD_SECRET)) {
+		return json({ error: "Unauthorized" }, 401);
+	}
+	return null;
+}
+
 // ── API: Direct upload to R2 (for local scrapers) ──
 async function handleUpload(
 	request: Request,
 	url: URL,
 	env: Env,
 ): Promise<Response> {
-	// Require bearer token auth
-	const authHeader = request.headers.get("Authorization") || "";
-	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-	if (!env.UPLOAD_SECRET || token !== env.UPLOAD_SECRET) {
-		return json({ error: "Unauthorized" }, 401);
-	}
+	// Auth is enforced at dispatch (MUTATING_ROUTES). Kept here as well so the
+	// handler is safe if it is ever called from a new path that forgets the gate.
+	const denied = requireUploadSecret(request, env);
+	if (denied) return denied;
 	const slug = url.searchParams.get("slug");
 	if (!slug) return json({ error: "slug required" }, 400);
 	const body = await request.text();
@@ -676,6 +1204,29 @@ async function handleUpload(
 		parsed.is_stale = false;
 	}
 	parsed.last_updated = parsed.last_updated || new Date().toISOString();
+
+	// Same integrity gate as the scraper path — an upload is a seed too, and a
+	// hand-built file is if anything MORE likely to carry a duplicate or a
+	// mislabelled row. Refuse rather than publish something provably wrong; the
+	// response names every violation so the operator can fix and re-upload.
+	if (Array.isArray(parsed.judges)) {
+		const deduped = dedupeById(parsed.judges);
+		parsed.judges = deduped.rows;
+		const report = auditJudges(slug, parsed.judges);
+		logAudit(report, deduped.conflicts);
+		if (!report.ok || deduped.conflicts.length) {
+			return json(
+				{
+					error: "Upload rejected: data-integrity audit failed",
+					errors: [...report.errors, ...deduped.conflicts],
+					warnings: report.warnings,
+					unmeasured: report.unmeasured,
+				},
+				422,
+			);
+		}
+	}
+
 	// Enrich bios from CourtListener so uploaded cities (SF, Texas) match the
 	// same bio coverage as LA/Seattle/NY.
 	if (parsed.judges?.length && parsed.state) {
@@ -1075,11 +1626,10 @@ async function handleUploadRaw(
 	url: URL,
 	env: Env,
 ): Promise<Response> {
-	const authHeader = request.headers.get("Authorization") || "";
-	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-	if (!env.UPLOAD_SECRET || token !== env.UPLOAD_SECRET) {
-		return json({ error: "Unauthorized" }, 401);
-	}
+	// Auth is enforced at dispatch (MUTATING_ROUTES); repeated here for the same
+	// defence-in-depth reason as handleUpload.
+	const denied = requireUploadSecret(request, env);
+	if (denied) return denied;
 	const key = url.searchParams.get("key");
 	if (!key) return json({ error: "key required" }, 400);
 	const contentType =
@@ -1316,19 +1866,44 @@ async function handleProcessNyOca(url: URL, env: Env): Promise<Response> {
 // ── SCRAPERS ──
 // ═══════════════════════════════════════════
 
-// ── Miami: CourtWatch.us API (FSS 907.043) ──
+// ── Florida: CourtWatch.us API (FSS 907.043) ──
+//
+// NOT a Miami feed, despite the `miami` slug it is still stored under. Probed
+// live 2026-09-03: all 51 rows carry a `county` and NONE of them is Miami-Dade —
+// Orange 18, Bay 17, Osceola 10, Monroe 6. CourtWatch's own /stats agrees
+// ({"counties":4}). The county set has already grown once (it was Bay-only
+// earlier in 2026), so nothing here may hardcode a county or assume how many
+// there are; the court label is built from each row's own `county` field, the
+// way CourtWatch's own UI does it.
+//
+// The slug stays `miami` on purpose: it is the R2 key (courts/miami.json) and
+// the deep-link parameter, so renaming it would orphan stored data and break
+// every existing /?judge=…&city=miami link. Only the human-readable labels are
+// corrected — see CITIES[].label.
 async function scrapeMiami(cityName: string): Promise<{
 	judges: JudgeRecord[];
 	source: string;
 	metric_labels?: MetricLabels;
+	excluded: string[];
+	/** judge id -> the county string the FEED reported, captured verbatim before
+	 *  it is formatted into a court label. The audit compares the label against
+	 *  this, so the check has an input the label cannot influence. Deriving the
+	 *  expected county back out of the court string instead makes the comparison
+	 *  a tautology that passes even when the label is hardcoded wrong — measured:
+	 *  an injected `court = "Circuit Court, Orange County, FL"` scored a clean
+	 *  pass and published 49 mislabelled judges. */
+	jurisdictions: Record<string, string>;
 }> {
 	const judges: JudgeRecord[] = [];
+	const excluded: string[] = [];
+	const jurisdictions: Record<string, string> = {};
 	try {
 		const res = await fetch(`${CW}/judges`);
 		if (!res.ok) throw new Error("CourtWatch unavailable");
 		const data = (await res.json()) as Array<{
 			id: number;
 			name: string;
+			county?: string;
 			total_cases: number;
 			failure_to_appear_count: number;
 			new_arrest_count: number;
@@ -1336,12 +1911,29 @@ async function scrapeMiami(cityName: string): Promise<{
 		}>;
 
 		for (const cw of data) {
+			// Two upstream rows are release-disposition reasons, not people. See
+			// CW_NON_JUDGE_ROWS in audit.ts for the full measurement of why no
+			// in-feed or cross-source discriminator exists.
+			if (isCourtWatchNonJudgeRow(cw.id, cw.name)) {
+				excluded.push(`cw-${cw.id} "${cw.name}"`);
+				continue;
+			}
+			// The county the feed itself reports. Phrased the way CourtWatch's own
+			// UI phrases it ("<county> County, FL") rather than naming a specific
+			// court: Bay rows mix county-court (CTMA/MMMA) and circuit (CFMA) case
+			// types, so claiming one named court for a judge would be a fact we
+			// cannot support.
+			const court = cw.county ? `${cw.county} County, FL` : "Florida";
+			if (cw.county) jurisdictions[`cw-${cw.id}`] = cw.county;
 			judges.push({
 				id: `cw-${cw.id}`,
 				name: cw.name,
-				city: cityName,
+				// County, not `cityName`. This is also what distinguishes the two
+				// "John Beamer" rows (Orange vs Osceola) without asserting whether
+				// they are one person or two.
+				city: cw.county ? `${cw.county} County` : cityName,
 				state: "Florida",
-				court: "Circuit Court, Orange County, FL",
+				court,
 				total_cases: cw.total_cases,
 				fta_count: cw.failure_to_appear_count,
 				rearrest_count: cw.new_arrest_count,
@@ -1353,6 +1945,8 @@ async function scrapeMiami(cityName: string): Promise<{
 		/* fallback handled by caller */
 	}
 	return {
+		excluded,
+		jurisdictions,
 		judges,
 		source: "CourtWatch.us — Florida Citizens Right to Know Act (FSS 907.043)",
 		metric_labels: {
@@ -1564,16 +2158,45 @@ async function scrapeAtlanta(cityName: string): Promise<{
 // LASC's media portal is an Angular SPA gated by reCAPTCHA; LA County's data
 // portal has no criminal disposition datasets keyed to judge names.
 // Strategy: CourtListener v4 bios for LASC judges (v4 required — v3 returns 0).
-// Fetch a single count from a Socrata-compatible endpoint
+/**
+ * Fetch a single count from a Socrata-compatible endpoint.
+ *
+ * Returns 0 on every failure, and callers treat 0 as "omit the stat block" —
+ * which is the right BEHAVIOUR (never render a fabricated zero) but was
+ * previously SILENT: a genuinely-zero count, a retired dataset, and a malformed
+ * query were indistinguishable, in the logs and everywhere else.
+ *
+ * Measured 2026-09-04: `data.houstontx.gov/resource/hz6g-h7f6` returns 404 —
+ * the dataset is gone — so the Texas stat block has been quietly absent, with
+ * nothing anywhere saying why. The count still degrades to 0; it now says so.
+ */
 async function socrataCount(url: string): Promise<number> {
+	const host = (() => {
+		try {
+			return new URL(url).host;
+		} catch {
+			return "unparseable-url";
+		}
+	})();
 	try {
 		const res = await fetch(url, {
 			headers: { "User-Agent": "JudgeSearch/2" },
 		});
-		if (!res.ok) return 0;
+		if (!res.ok) {
+			// Log the host + status, never the full URL: a Socrata query string
+			// can carry an app token on other endpoints.
+			console.log(`[socrata] ${host} returned ${res.status} — stat omitted`);
+			return 0;
+		}
 		const data = (await res.json()) as Array<{ count?: string }>;
-		return Number(data[0]?.count || 0);
-	} catch {
+		const n = Number(data[0]?.count || 0);
+		if (!n)
+			console.log(`[socrata] ${host} returned no count rows — stat omitted`);
+		return n;
+	} catch (e) {
+		console.log(
+			`[socrata] ${host} fetch failed: ${e instanceof Error ? e.message : String(e)} — stat omitted`,
+		);
 		return 0;
 	}
 }
@@ -2156,13 +2779,78 @@ function json(data: unknown, status = 200) {
 	});
 }
 
+// ── Crawler files ──
+
+/**
+ * The site is two crawlable surfaces: the homepage and the server-rendered A–Z
+ * index at /judges. Everything else is an API route, and none of it belongs in
+ * a search index.
+ *
+ * The host is taken from the REQUEST, not hardcoded: this Worker answers on
+ * judge-search.barkleesanders.workers.dev today, and a sitemap that names a
+ * different origin than the one it was fetched from is ignored by crawlers.
+ */
+function siteUrls(url: URL): string[] {
+	return [`${url.origin}/`, `${url.origin}/judges`];
+}
+
+/**
+ * lastmod is the date of the last commit that changed src/index.ts, because
+ * that single file IS both pages — there is no per-page source to date them
+ * separately, and inventing distinct dates would be a fabrication. /ship's
+ * Phase 1.4-lastmod bumps this when the page content changes.
+ */
+const SITEMAP_LASTMOD = "2026-09-04";
+
+function sitemapResponse(url: URL): Response {
+	const body =
+		'<?xml version="1.0" encoding="UTF-8"?>\n' +
+		'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+		siteUrls(url)
+			.map(
+				(loc) =>
+					`  <url><loc>${escapeHtml(loc)}</loc><lastmod>${SITEMAP_LASTMOD}</lastmod></url>\n`,
+			)
+			.join("") +
+		"</urlset>\n";
+	return new Response(body, {
+		headers: {
+			"content-type": "application/xml; charset=utf-8",
+			"cache-control": "public, max-age=3600",
+		},
+	});
+}
+
+function robotsResponse(url: URL): Response {
+	// The /api/* surface is data for this page, not content for an index, and
+	// crawling it burns R2 reads for no one's benefit. Everything else is open:
+	// this is a public-records site and being findable is the entire point.
+	const body = [
+		"User-agent: *",
+		"Disallow: /api/",
+		"Allow: /",
+		"",
+		`Sitemap: ${url.origin}/sitemap.xml`,
+		"",
+	].join("\n");
+	return new Response(body, {
+		headers: {
+			"content-type": "text/plain; charset=utf-8",
+			"cache-control": "public, max-age=3600",
+		},
+	});
+}
+
 // ── HTML ──
+// Exported so tests can assert over the RENDERED client script (template
+// escapes already resolved) rather than the raw source text.
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JudgeSearch — Know Your Judges. Hold Them Accountable.</title>
+<link rel="canonical" href="https://judge-search.barkleesanders.workers.dev/">
 <meta name="description" content="Search real court records across 8 U.S. cities. 880,000+ cases. See how often defendants released by each judge missed court, got rearrested, or had their release revoked. All public data.">
 <meta name="theme-color" content="#c8a84b">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -2185,23 +2873,56 @@ const HTML = `<!DOCTYPE html>
 <meta name="twitter:description" content="Search 880,000+ court records across 8 U.S. cities. See which judges had the most missed court dates, rearrests, and release revocations. Public data, plain English.">
 <meta name="twitter:image" content="https://judge-search.barkleesanders.workers.dev/og-image.png?v=20260412">
 <meta name="twitter:image:alt" content="JudgeSearch — scales of justice, 8 cities, 225+ judges, 881K cases. Real open-data sources from CourtWatch, Cook County, Fulton County, DataSF, Harris County, and CourtListener.">
+<!-- Structured data. Every claim here is one the site can actually back.
+     The SearchAction is honest ONLY because /?q= really drives the search
+     (shipped 2026-09-04); before that it would have advertised a capability
+     the site did not have, which is why this block waited for that commit.
+     Organization.sameAs names exactly one profile: the GitHub repository this
+     site is deployed from, which the footer also links. That ordering is the
+     rule, not a coincidence -- a sameAs may only name a profile the site
+     itself publishes, so the footer link IS the evidence for the claim. A
+     plausible-looking guessed URL would be a fabrication with a valid shape
+     and would pass every structural check there is. Note the data-source links
+     elsewhere on this page (CourtWatch, DataSF, CourtListener) are sameAs for
+     THOSE organisations and must never appear here. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://judge-search.barkleesanders.workers.dev/#website",
+      "url": "https://judge-search.barkleesanders.workers.dev/",
+      "name": "JudgeSearch",
+      "description": "Search real court records across 8 U.S. cities. See how often defendants released by each judge missed court, got rearrested, or had their release revoked.",
+      "inLanguage": "en-US",
+      "publisher": { "@id": "https://judge-search.barkleesanders.workers.dev/#org" },
+      "potentialAction": {
+        "@type": "SearchAction",
+        "target": {
+          "@type": "EntryPoint",
+          "urlTemplate": "https://judge-search.barkleesanders.workers.dev/?q={search_term_string}"
+        },
+        "query-input": "required name=search_term_string"
+      }
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://judge-search.barkleesanders.workers.dev/#org",
+      "name": "JudgeSearch",
+      "url": "https://judge-search.barkleesanders.workers.dev/",
+      "sameAs": ["https://github.com/barkleesanders/judge-search"]
+    }
+  ]
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,800;1,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0a0a0a;--s:#111;--s2:#161616;--s3:#1c1c1c;
-  --b:#222;--b2:#333;
-  --t:#f0ece4;--t2:#a09a8c;--t3:#6b6560;
-  --gold:#c8a84b;--gold2:#e0c96a;--gg:rgba(200,168,75,.12);
-  --red:#e84040;--orange:#f0883e;--green:#34d399;
-  --serif:'Playfair Display',Georgia,serif;
-  --sans:'IBM Plex Sans',-apple-system,system-ui,sans-serif;
-  --mono:'IBM Plex Mono','SF Mono',monospace;
-  --r:8px;
-}
+${CSS_TOKENS}
 body{font-family:var(--sans);background:var(--bg);color:var(--t);line-height:1.6;min-height:100vh}
 a{color:var(--gold);text-decoration:none}a:hover{color:var(--gold2)}
 .wrap{max-width:1200px;margin:0 auto;padding:0 24px}
@@ -2225,6 +2946,10 @@ nav{position:sticky;top:0;z-index:50;background:rgba(10,10,10,.95);backdrop-filt
 .ml-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
 .leaflet-popup-content-wrapper{background:var(--s)!important;color:var(--t)!important;border:1px solid var(--b2)!important;border-radius:var(--r)!important;font-family:var(--sans)!important}
 .leaflet-popup-tip{background:var(--s)!important}
+/* OSM ships a LIGHT basemap; invert it to match this dark page. Scoped to the
+   TILE pane on purpose — the marker pane is a sibling, so the gold city dots
+   and their glow keep their real colours instead of inverting to blue. */
+.leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.95)}
 .leaflet-control-attribution{background:rgba(10,10,10,.8)!important;color:var(--t3)!important;font-size:.6rem!important}
 .leaflet-control-attribution a{color:var(--gold)!important}
 .leaflet-control-zoom a{background:var(--s)!important;color:var(--gold)!important;border-color:var(--b)!important}
@@ -2233,6 +2958,29 @@ nav{position:sticky;top:0;z-index:50;background:rgba(10,10,10,.95);backdrop-filt
 .pills{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:24px auto;max-width:800px}
 .pill{padding:8px 18px;background:var(--s);border:1px solid var(--b);border-radius:20px;color:var(--t2);font-family:var(--mono);font-size:.8rem;cursor:pointer;transition:all .2s}
 .pill:hover,.pill.on{border-color:var(--gold);color:var(--gold);background:var(--gg)}
+
+/* NAME SEARCH */
+.jsearch{position:relative;max-width:560px;margin:24px auto 0;text-align:left}
+.jsearch-in{width:100%;padding:13px 44px 13px 16px;background:var(--s);border:1px solid var(--b2);border-radius:var(--r);color:var(--t);font-family:var(--sans);font-size:1rem;transition:border-color .2s,box-shadow .2s}
+.jsearch-in::placeholder{color:var(--t3)}
+.jsearch-in:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px var(--gg)}
+.jsearch-ic{position:absolute;right:15px;top:13px;color:var(--t3);pointer-events:none}
+.jsearch-pop{position:absolute;left:0;right:0;top:calc(100% + 6px);background:var(--s);border:1px solid var(--b2);border-radius:var(--r);box-shadow:0 14px 36px rgba(0,0,0,.6);z-index:60;max-height:390px;overflow-y:auto;display:none;text-align:left}
+.jsearch-pop.on{display:block}
+.jsearch-opt{display:block;width:100%;text-align:left;padding:10px 14px;background:transparent;border:0;border-bottom:1px solid var(--b);color:var(--t);cursor:pointer;font-family:var(--sans)}
+.jsearch-opt:last-child{border-bottom:0}
+.jsearch-opt:hover,.jsearch-opt.sel{background:var(--gg)}
+.jsearch-opt .jo-n{font-weight:600;font-size:.92rem}
+.jsearch-opt:hover .jo-n,.jsearch-opt.sel .jo-n{color:var(--gold)}
+.jsearch-opt .jo-m{color:var(--t2);font-size:.76rem;margin-top:1px}
+.jsearch-opt .jo-c{font-family:var(--mono);font-size:.68rem;color:var(--t3);margin-top:2px}
+.jsearch-msg{padding:14px;color:var(--t3);font-size:.85rem;font-family:var(--mono)}
+.jsearch-more{padding:9px 14px;color:var(--t3);font-size:.74rem;font-family:var(--mono);border-top:1px solid var(--b);background:var(--s2)}
+.jsearch-all{margin-top:10px;font-family:var(--mono);font-size:.76rem;color:var(--t3);text-align:center}
+.vh{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* Judge landed on from a search hit or a /?judge= deep link */
+.bcard.jfocus,tr.jfocus{outline:2px solid var(--gold);outline-offset:2px;animation:jflash 2.6s ease-out}
+@keyframes jflash{0%,25%{background:rgba(200,168,75,.20)}100%{background:transparent}}
 
 /* STATS BAR */
 .sbar{display:none;gap:1px;background:var(--b);border:1px solid var(--b);border-radius:var(--r);overflow:hidden;max-width:800px;margin:0 auto 20px}
@@ -2335,11 +3083,19 @@ footer a{color:var(--gold)}
 </style>
 </head>
 <body>
-<nav><div class="ni"><div class="logo">Judge<span>Search</span>.us</div><div class="nl"><a href="#map-box">Map</a><a href="#worst50" style="color:var(--red)">Worst 50</a><a href="#method">About</a><a href="#sources">Data Sources</a><a href="https://free.law/about/" target="_blank">Free Law Project</a></div></div></nav>
+<nav><div class="ni"><div class="logo">Judge<span>Search</span>.us</div><div class="nl"><a href="/judges">All Judges</a><a href="#map-box">Map</a><a href="#worst50" style="color:var(--red)">Worst 50</a><a href="#method">About</a><a href="#sources">Data Sources</a><a href="https://free.law/about/" target="_blank">Free Law Project</a></div></div></nav>
 
 <section class="hero">
 <h1>Know your judges.<br><em>Hold them accountable.</em></h1>
 <p>Search real court records across 8 U.S. cities. See how often defendants under each judge <strong>didn't show up to court</strong>, got <strong>arrested again while waiting for trial</strong>, or had their <strong>release conditions taken away</strong>. All public data — no sign-up needed.</p>
+<div class="jsearch">
+<label for="jq" class="vh">Search judges by name</label>
+<input id="jq" class="jsearch-in" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Search any judge by name&hellip;" role="combobox" aria-expanded="false" aria-controls="jresults" aria-autocomplete="list">
+<span class="jsearch-ic" aria-hidden="true">&#128269;</span>
+<div id="jresults" class="jsearch-pop" role="listbox" aria-label="Judge search results"></div>
+<div class="jsearch-all"><a href="/judges" id="jall">Browse all judges A&ndash;Z &rarr;</a></div>
+<p id="jstatus" class="vh" role="status" aria-live="polite"></p>
+</div>
 </section>
 
 <div class="wrap">
@@ -2470,8 +3226,8 @@ footer a{color:var(--gold)}
 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px" class="how-grid">
 
 <div style="padding:18px;background:var(--s);border:1px solid var(--b);border-radius:var(--r)">
-<div style="font-size:.75rem;color:var(--gold);font-family:var(--mono);letter-spacing:.05em;margin-bottom:6px">MIAMI · FLORIDA</div>
-<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge pretrial outcomes</strong> — missed court, rearrests, release revocations.</p>
+<div style="font-size:.75rem;color:var(--gold);font-family:var(--mono);letter-spacing:.05em;margin-bottom:6px">FLORIDA · COUNTY REGISTERS</div>
+<p style="color:var(--t2);font-size:.85rem;margin:0 0 8px 0"><strong style="color:var(--t)">Per-judge pretrial outcomes</strong> — missed court, rearrests, release revocations. Each judge is listed under the county their register reports.</p>
 <p style="color:var(--t3);font-size:.75rem;margin:0">Source: <a href="https://courtwatch.us" target="_blank" style="color:var(--gold)">CourtWatch.us</a> (FSS 907.043 public disclosure law)</p>
 </div>
 
@@ -2536,14 +3292,19 @@ footer a{color:var(--gold)}
 </section>
 
 <footer>
-<p>Public court data · Built with <a href="https://free.law/about/" target="_blank">Free Law Project</a> data · <a href="#method">About</a> · <a href="#sources">Sources</a></p>
+<p>Public court data · Built with <a href="https://free.law/about/" target="_blank">Free Law Project</a> data · <a href="/judges">All judges A&ndash;Z</a> · <a href="#method">About</a> · <a href="#sources">Sources</a> · <a href="https://github.com/barkleesanders/judge-search" target="_blank" rel="noopener">Source code</a></p>
 <p style="margin-top:8px;font-size:.72rem;color:var(--t3)">Not legal advice. All data is public record. &copy; 2025 JudgeSearch</p>
 </footer>
 
 <script>
 const $=id=>document.getElementById(id);
 const CITIES=[
-  {slug:'miami',label:'Miami',lat:25.76,lng:-80.19,live:true},
+  // The 'miami' slug is a Florida-wide CourtWatch feed, not a Miami one: the
+  // counties it covers are Orange, Bay, Osceola and Monroe (none is
+  // Miami-Dade), so the pin sits at the state's geographic centre rather than
+  // asserting these judges sit in Miami. The slug itself is the R2 key and the
+  // deep-link parameter, so it stays.
+  {slug:'miami',label:'Florida',lat:28.6,lng:-82.4,live:true},
   {slug:'chicago',label:'Chicago',lat:41.88,lng:-87.63,live:true},
   {slug:'atlanta',label:'Atlanta',lat:33.75,lng:-84.39,live:true},
   {slug:'san-francisco',label:'San Francisco',lat:37.77,lng:-122.42,live:true},
@@ -2560,9 +3321,31 @@ $('pills').innerHTML=CITIES.map(c=>
 
 // Leaflet map
 let map=L.map('leaflet-map',{scrollWheelZoom:false}).setView([39,-96],4);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-  subdomains:'abcd',maxZoom:18
+// Basemap: OpenStreetMap raster, darkened in CSS (see .leaflet-tile-pane).
+//
+// Was CARTO dark_all until 2026-09-03. CARTO now requires an API key for its
+// basemaps and serves unkeyed requests as a VALID 200 image/png with
+// "API KEY REQUIRED / carto.com/basemaps/apikey" watermarked diagonally into
+// the tile. That is why this failed silently: status, size and content-type
+// are all indistinguishable from a good tile, so only looking at the pixels
+// catches it. Measured 2026-09-03 — 1x (7387 b) and @2x (19568 b) are both
+// watermarked, no-referer is byte-identical, and the legacy
+// cartodb-basemaps-*.global.ssl.fastly.net host returns the same 7387 b tile.
+// It is a policy change, not a usage cap.
+//
+// OSM has no key and no quota. Its tile policy (operations.osmfoundation.org/
+// policies/tiles/, retrieved 2026-09-03) permits public websites provided the
+// browser sends a Referer (it does), tiles are cached >=7 days (Leaflet honours
+// the upstream headers), and nothing bulk-prefetches. maxZoom 18 keeps us off
+// the z>=14 automated-scan behaviour the policy calls out.
+//
+// NOTE: the img-src CSP directive must list this host or every tile is blocked
+// and the map goes BLANK — a worse failure than the watermark. Verified by
+// swapping the URL alone in the live DOM: 15/15 tiles refused. Keep the tile
+// host and the CSP in sync.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom:18
 }).addTo(map);
 CITIES.forEach(c=>{
   const color=c.live?'#c8a84b':'#555';
@@ -2590,6 +3373,13 @@ function loadCity(el){
 // (volume × rate, the absolute-harm view).
 let _currentCity=null;
 let _sortMode='rate';
+// Whether the overflow table ("Show N more judges") is expanded. This is
+// MODULE-level, not DOM-level, on purpose: setSort() re-renders the whole
+// results area, so a class toggled on the old table is destroyed on every tab
+// switch. A visitor who expanded the full list, then switched from By rate to
+// By total rearrests, silently got a collapsed 12-of-32 view back — which reads
+// as "this tab is missing judges" rather than "your list re-collapsed".
+let _showAll=false;
 
 async function fetchCity(slug){
   const area=$('results');
@@ -2662,6 +3452,246 @@ async function fetchWorst50(){
 
 // Load rankings on page ready
 fetchWorst50();
+
+// ── Global name search ────────────────────────────────────────────────────
+// /api/judges costs 8-9 R2 reads server-side, so it is fetched ONCE per visitor,
+// lazily on first interaction with the box, and every keystroke after that
+// filters the in-memory copy. Never one request per keystroke.
+let _index=null;        // JudgeIndexEntry[] once loaded
+let _indexLoad=null;    // in-flight promise so concurrent events share ONE fetch
+let _hits=[];           // the slice currently shown in the dropdown
+let _sel=-1;            // arrow-key highlighted row
+let _pendingFocus=null; // judge id to scroll to on the next render()
+const MAX_HITS=12;
+
+function jStatus(m){const el=$('jstatus');if(el)el.textContent=m;}
+
+function loadIndex(){
+  if(_index)return Promise.resolve(_index);
+  if(_indexLoad)return _indexLoad;
+  _indexLoad=fetch('/api/judges').then(function(r){
+    if(!r.ok)throw new Error('Judge index unavailable');
+    return r.json();
+  }).then(function(d){
+    _index=d.judges||[];
+    const all=$('jall');
+    if(all&&_index.length)all.textContent='Browse all '+_index.length.toLocaleString()+' judges A\\u2013Z \\u2192';
+    return _index;
+  }).catch(function(e){_indexLoad=null;throw e;});
+  return _indexLoad;
+}
+
+// Stored names are prefixed ("Judge Linda Colfax"), so the haystack holds BOTH
+// the stripped and the raw form. Every whitespace-separated token in the query
+// must appear somewhere in it, which makes "colfax", "Colfax", "Linda Colfax"
+// and "linda col" all land on the same judge.
+function normName(s){return (s||'').toLowerCase().replace(/^(the\\s+)?(hon(ourable|orable)?\\.?|judge|justice|magistrate|commissioner)\\s+/,'').trim();}
+
+function searchJudges(q){
+  const tokens=(q||'').toLowerCase().trim().split(/\\s+/).filter(Boolean);
+  if(!tokens.length||!_index)return[];
+  const out=[];
+  for(let i=0;i<_index.length;i++){
+    const j=_index[i];
+    const hay=normName(j.name)+' '+(j.name||'').toLowerCase();
+    let ok=true;
+    for(let t=0;t<tokens.length;t++){if(hay.indexOf(tokens[t])===-1){ok=false;break;}}
+    if(ok)out.push(j);
+  }
+  const head=tokens[0];
+  out.sort(function(a,b){
+    const ap=normName(a.name).indexOf(head)===0?0:1;
+    const bp=normName(b.name).indexOf(head)===0?0:1;
+    if(ap!==bp)return ap-bp;
+    if(b.total_cases!==a.total_cases)return b.total_cases-a.total_cases;
+    return (a.name||'').localeCompare(b.name||'');
+  });
+  return out;
+}
+
+function openSearch(){const p=$('jresults'),q=$('jq');if(p)p.classList.add('on');if(q)q.setAttribute('aria-expanded','true');}
+function closeSearch(){
+  const p=$('jresults'),q=$('jq');
+  if(p){p.classList.remove('on');p.innerHTML='';}
+  if(q){q.setAttribute('aria-expanded','false');q.removeAttribute('aria-activedescendant');}
+  _hits=[];_sel=-1;
+}
+
+function renderHits(all,q){
+  const pop=$('jresults');
+  if(!pop)return;
+  _hits=all.slice(0,MAX_HITS);_sel=-1;
+  if(all.length===0){
+    pop.innerHTML='<div class="jsearch-msg">No judge matches \\u201c'+esc(q)+'\\u201d</div>';
+    openSearch();jStatus('No judges found');return;
+  }
+  let h='';
+  for(let i=0;i<_hits.length;i++){
+    const j=_hits[i];
+    const cases=j.total_cases>0?j.total_cases.toLocaleString()+' cases':'no case data';
+    h+='<button type="button" class="jsearch-opt" role="option" aria-selected="false" id="jopt-'+i+'" onclick="pickHit('+i+')">'
+      +'<div class="jo-n">'+esc(j.name)+'</div>'
+      +'<div class="jo-m">'+esc(j.court)+' \\u00b7 '+esc(j.city)+', '+esc(j.state)+'</div>'
+      +'<div class="jo-c">'+cases+'</div></button>';
+  }
+  if(all.length>_hits.length){
+    h+='<div class="jsearch-more">\\u2026'+(all.length-_hits.length)+' more \\u2014 keep typing, or <a href="/judges">browse all A\\u2013Z</a></div>';
+  }
+  pop.innerHTML=h;openSearch();
+  jStatus(all.length+' judge'+(all.length===1?'':'s')+' found');
+}
+
+function moveSel(d){
+  const opts=document.querySelectorAll('#jresults .jsearch-opt');
+  if(!opts.length)return;
+  if(_sel>=0&&opts[_sel]){opts[_sel].classList.remove('sel');opts[_sel].setAttribute('aria-selected','false');}
+  if(_sel<0)_sel=d>0?0:opts.length-1;
+  else _sel=(_sel+d+opts.length)%opts.length;
+  const el=opts[_sel];
+  el.classList.add('sel');el.setAttribute('aria-selected','true');
+  const q=$('jq');if(q)q.setAttribute('aria-activedescendant',el.id);
+  el.scrollIntoView({block:'nearest'});
+}
+
+function pickHit(i){
+  const j=_hits[i];
+  if(!j)return;
+  closeSearch();
+  const q=$('jq');if(q)q.value=j.name;
+  // Leave the SAME canonical deep link the /judges page emits (judgeHref), so a
+  // URL copied after picking from the dropdown reopens exactly this judge.
+  if(history.replaceState){
+    try{history.replaceState(null,'','/?judge='+encodeURIComponent(j.id)+'&city='+encodeURIComponent(j.slug));}catch(e){}
+  }
+  focusJudge(j.id,j.slug);
+}
+
+// ── URL-addressable search: /?q=<name> ────────────────────
+// The address bar IS the search state: typing rewrites ?q=, and a link carrying
+// ?q= reproduces the same results on load, so a search is shareable.
+//
+// replaceState, not pushState — one history entry per keystroke would bury the
+// page the visitor arrived from under a dozen back-presses.
+function syncUrl(v){
+  if(!history.replaceState)return;
+  try{
+    const u=new URL(location.href);
+    if(v)u.searchParams.set('q',v);else u.searchParams.delete('q');
+    // A live search and a judge deep-link are different states. Once the visitor
+    // types, ?judge= no longer describes what they are looking at, so it must not
+    // survive into a URL they then reload or share.
+    u.searchParams.delete('judge');u.searchParams.delete('city');
+    history.replaceState(null,'',u.pathname+u.search+u.hash);
+  }catch(e){}
+}
+
+// EVERY writer of the search state goes through here — the input handler, the
+// on-load ?q= handler, and clearing — so the box, the dropdown and the URL can
+// never disagree. A new entry point calls this; it does not re-implement it.
+//
+// updateUrl=false when the URL is already the source of the query (page load),
+// so restoring a shared link never rewrites the address bar it came from.
+function runSearch(v,updateUrl){
+  const box=$('jq');
+  if(box&&box.value!==v)box.value=v;
+  if(updateUrl!==false)syncUrl(v);
+  if(!v.trim()){closeSearch();jStatus('');return;}
+  if(_index){renderHits(searchJudges(v),v);return;}
+  const pop=$('jresults');
+  if(pop)pop.innerHTML='<div class="jsearch-msg">Loading judge index\\u2026</div>';
+  openSearch();
+  loadIndex().then(function(){
+    // Re-read the box rather than reusing v: the visitor keeps typing while the
+    // index loads, and rendering the stale query would discard those keystrokes.
+    const cur=$('jq'),now=cur?cur.value:v;
+    renderHits(searchJudges(now),now);
+  }).catch(function(e){if(pop)pop.innerHTML='<div class="jsearch-msg">'+esc(e.message)+'</div>';});
+}
+
+// Find a city pill WITHOUT building a CSS selector out of the value. A slug can
+// arrive from the query string, and interpolating one into an attribute
+// selector throws an uncaught SyntaxError on anything containing a quote or a
+// bracket (measured: /?judge=x&city=%22%5D). Comparing dataset values cannot
+// throw, whatever the input.
+function pillFor(slug){
+  const pills=document.querySelectorAll('.pill');
+  for(let i=0;i<pills.length;i++){if(pills[i].dataset.slug===slug)return pills[i];}
+  return null;
+}
+
+// Load the judge's city through the SAME path a pill click uses, then let
+// render() scroll to and flash the row. Landing the visitor in the right city
+// without showing them the judge they asked for is not an answer.
+//
+// An unrecognised slug is never fetched directly — it is re-resolved from the
+// index by judge id, so a malformed or hand-edited link degrades to "nothing
+// happens" instead of an error banner driven by the URL.
+function focusJudge(id,slug){
+  const pill=pillFor(slug);
+  if(pill){_pendingFocus=id;loadCity(pill);return;}
+  loadIndex().then(function(list){
+    for(let i=0;i<list.length;i++){
+      if(list[i].id===id){
+        const p2=pillFor(list[i].slug);
+        if(p2){_pendingFocus=id;loadCity(p2);}
+        return;
+      }
+    }
+  }).catch(function(){});
+}
+
+function applyPendingFocus(){
+  if(!_pendingFocus)return;
+  const id=_pendingFocus;_pendingFocus=null;
+  const el=document.getElementById('j-'+id);
+  if(!el)return;
+  // The judge may be inside the collapsed overflow table — open it first.
+  const tbl=el.closest?el.closest('.jtable'):null;
+  if(tbl&&!tbl.classList.contains('show')){
+    tbl.classList.add('show');
+    const tog=document.querySelector('.more-toggle');
+    if(tog)tog.textContent='\\u25B2 Hide remaining judges';
+  }
+  el.classList.add('jfocus');
+  el.scrollIntoView({block:'center',behavior:'smooth'});
+  setTimeout(function(){el.classList.remove('jfocus');},2800);
+}
+
+(function(){
+  const q=$('jq');
+  if(!q)return;
+  let warmed=false;
+  q.addEventListener('focus',function(){if(warmed)return;warmed=true;loadIndex().catch(function(){});});
+  q.addEventListener('input',function(){runSearch(q.value,true);});
+  q.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){closeSearch();q.blur();return;}
+    if(!_hits.length)return;
+    if(e.key==='ArrowDown'){e.preventDefault();moveSel(1);}
+    else if(e.key==='ArrowUp'){e.preventDefault();moveSel(-1);}
+    else if(e.key==='Enter'){e.preventDefault();pickHit(_sel<0?0:_sel);}
+  });
+  document.addEventListener('click',function(e){
+    const w=q.closest('.jsearch');
+    if(w&&!w.contains(e.target))closeSearch();
+  });
+})();
+
+// Shareable links, two schemes:
+//   /?judge=<id>&city=<slug>  one judge     (city rides along so the common case
+//                                            costs zero extra requests; a link
+//                                            that lost it still resolves by
+//                                            looking the id up in the index)
+//   /?q=<name>                a name search (reproduces the dropdown on load)
+//
+// ?judge= wins when both are present: it names one specific judge, which is
+// strictly more resolved than a query that may match several.
+(function(){
+  const sp=new URLSearchParams(location.search);
+  const jid=sp.get('judge');
+  if(jid){focusJudge(jid,sp.get('city')||'');return;}
+  const q=sp.get('q');
+  if(q&&q.trim())runSearch(q,false);
+})();
 
 function render(d){
   // Per-city metric labels with fallbacks
@@ -2840,10 +3870,10 @@ function render(d){
 
       h+='<div style="background:linear-gradient(135deg,rgba(232,64,64,.08),rgba(200,168,75,.06));border:1px solid var(--b2);border-radius:var(--r);padding:22px 22px 18px;margin-bottom:24px">';
       h+='<div style="font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;margin-bottom:6px">RELEASED BEFORE TRIAL — WHAT HAPPENED NEXT</div>';
-      h+='<div style="color:var(--t);font-size:1rem;line-height:1.5;margin-bottom:18px">In '+esc(d.city)+', when one of these '+eligible.length+' judges sent a defendant home to wait for trial, here is how often that person was charged with a new crime <em>before</em> the case ended. Three judges, side by side:</div>';
+      h+='<div style="color:var(--t);font-size:1rem;line-height:1.5;margin-bottom:18px">In '+esc(d.city)+', when one of these '+eligible.length+' judges (of '+d.judges.length+' total \u2014 these are the ones with at least 100 cases) sent a defendant home to wait for trial, here is how often that person was charged with a new crime <em>before</em> the case ended. Three judges, side by side:</div>';
 
       h+=bar('Lowest rate',null,lowJ,lowRate);
-      h+=bar('Average across all '+eligible.length+' judges','—',null,avgRate);
+      h+=bar('Average across those '+eligible.length+' judges','—',null,avgRate);
       h+=bar('Highest rate',null,highJ,highRate);
 
       h+='<div style="color:var(--t);font-size:.95rem;line-height:1.5;margin:6px 0 0;padding-top:14px;border-top:1px solid var(--b)">Same city. Same kind of crime, sometimes. <strong>Different judge — very different outcome.</strong> Scroll down to see where every judge in '+esc(d.city)+' falls.</div>';
@@ -2912,7 +3942,7 @@ function render(d){
     // Rank color: top 25% red, top 50% orange, bottom half green
     const rankColor=rank&&totalRanked?(rank<=Math.ceil(totalRanked*0.25)?'var(--red)':rank<=Math.ceil(totalRanked*0.5)?'var(--orange)':'var(--green)'):'var(--t3)';
 
-    h+='<div class="bcard">';
+    h+='<div class="bcard" id="j-'+esc(j.id)+'">';
     // Rank ribbon
     if(rank){
       h+='<div style="position:absolute;top:0;left:0;background:'+rankColor+';color:#0a0a0a;font-family:var(--serif);font-weight:800;font-size:.85rem;padding:4px 10px 4px 8px;border-radius:var(--r) 0 8px 0;letter-spacing:.02em">#'+rank+' of '+totalRanked+'</div>';
@@ -2993,13 +4023,16 @@ function render(d){
   // Remaining judges as compact table
   if(restJudges.length>0){
     h+='<div class="more-judges">';
-    h+='<button class="more-toggle" onclick="document.querySelector(\\'.jtable\\').classList.toggle(\\'.show\\');this.textContent=this.textContent.includes(\\'Show\\')?\\'\u25B2 Hide\\':(\\'\\u25BC Show '+restJudges.length+' More Judges\\')">\\u25BC Show '+restJudges.length+' More Judges</button>';
-    h+='<table class="jtable">';
+    // No inline onclick: the old one called classList.toggle('.show') with a
+    // leading dot, adding a class literally named ".show" that matches no
+    // selector. It was invisible because the handler below reassigns onclick.
+    h+='<button class="more-toggle" type="button">'+(_showAll?'\u25B2 Hide '+restJudges.length+' more judges':'\u25BC Show all '+d.judges.length+' judges ('+restJudges.length+' more)')+'</button>';
+    h+='<table class="jtable'+(_showAll?' show':'')+'">';
     h+='<thead><tr><th>Name</th><th>Court</th><th class="num">Cases</th><th class="num">'+esc(lbl.fta)+'</th><th class="num">'+esc(lbl.rearrest)+'</th><th class="num">'+esc(lbl.revocation)+'</th><th class="num">Rate %</th></tr></thead>';
     h+='<tbody>';
     for(const j of restJudges){
       const cr=j.total_cases>0?Math.round(j.rearrest_count/j.total_cases*100):0;
-      h+='<tr><td>'+esc(j.name)+'</td><td style="color:var(--t2);font-size:.8rem">'+esc(j.court)+'</td>';
+      h+='<tr id="j-'+esc(j.id)+'"><td>'+esc(j.name)+'</td><td style="color:var(--t2);font-size:.8rem">'+esc(j.court)+'</td>';
       h+='<td class="num">'+j.total_cases.toLocaleString()+'</td>';
       h+='<td class="num" style="color:var(--red)">'+j.fta_count.toLocaleString()+'</td>';
       h+='<td class="num" style="color:var(--orange)">'+j.rearrest_count.toLocaleString()+'</td>';
@@ -3018,10 +4051,13 @@ function render(d){
       const tbl=document.querySelector('.jtable');
       if(tbl){
         tbl.classList.toggle('show');
+        _showAll=tbl.classList.contains('show');
         this.textContent=tbl.classList.contains('show')?'\\u25B2 Hide remaining judges':'\\u25BC Show '+restJudges.length+' more judges';
       }
     };
   }
+
+  applyPendingFocus();
 }
 
 function rateBar(label,rate,vsAvg,isAbove,color){

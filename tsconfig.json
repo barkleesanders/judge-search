@@ -7,7 +7,17 @@
 		"types": ["@cloudflare/workers-types"],
 		"strict": true,
 		"noEmit": true,
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		// Source imports carry the .ts extension because Node's built-in test
+		// runner resolves the real file at runtime (no build step). esbuild and
+		// wrangler both accept it; nothing is emitted from here.
+		"allowImportingTsExtensions": true
 	},
-	"include": ["src"]
+	"include": ["src"],
+	// Test files run under Node, not workerd, so they need node: builtins that
+	// the Worker lib deliberately excludes. Pulling @types/node in here would put
+	// Node's globals on the Worker's type surface, which is exactly the mistake
+	// this config's narrow "types" array exists to prevent. They are verified by
+	// being executed (npm test) rather than by this typecheck.
+	"exclude": ["src/**/*.test.ts"]
 }

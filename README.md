@@ -34,7 +34,13 @@ Single Cloudflare Worker (`src/index.ts`). Everything lives in one file:
 - Scrapers (one per city, fetch + normalize to `JudgeRecord[]`)
 - Daily cron (`0 6 * * *` UTC) calls all scrapers and writes to R2
 - `/api/city?slug=X` reads from R2 (with label normalization on the fly)
-- `/api/seed?slug=X` triggers a scraper manually
+- `/api/seed?slug=X` triggers a scraper manually — **requires the `UPLOAD_SECRET`
+  bearer token**, as do `/api/enrich-bios` and `/api/process-ny-oca`. All three
+  write stored data, so all three are gated:
+  `curl -H "Authorization: Bearer $UPLOAD_SECRET" ".../api/seed?slug=miami"`.
+  Read-only routes stay public — public reads are the point of the site.
+  The daily cron is unaffected: it calls the seed/enrich functions in-process,
+  never over HTTP.
 - `/api/upload` accepts pre-built JSON via authenticated POST
 - Inline HTML/CSS/JS rendered from the same file (no frontend framework)
 
@@ -59,7 +65,7 @@ npx wrangler deploy          # ship to production
 ### Required secrets
 
 ```bash
-npx wrangler secret put UPLOAD_SECRET        # for /api/upload POST auth
+./node_modules/.bin/wrangler secret put UPLOAD_SECRET   # auth for ALL write routes
 npx wrangler secret put COURTLISTENER_TOKEN  # for per-judge opinion enrichment (optional)
 ```
 

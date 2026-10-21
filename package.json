@@ -2,14 +2,23 @@
 	"name": "judge-search",
 	"version": "1.0.0",
 	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=22.18.0"
+	},
 	"scripts": {
 		"dev": "wrangler dev",
-		"deploy": "wrangler deploy"
+		"deploy": "wrangler deploy",
+		"test": "node --test src/*.test.ts",
+		"build": "wrangler deploy --dry-run --config wrangler.toml --outdir dist",
+		"check:runtime": "node scripts/check-runtime.mjs",
+		"check": "tsc --noEmit && biome check . --error-on-warnings && node --test src/*.test.ts && npm run build && npm run check:runtime"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.11",
-		"@cloudflare/workers-types": "^4.20250410.0",
+		"@biomejs/biome": "2.5.14",
+		"@cloudflare/workers-types": "5.20261021.1",
+		"miniflare": "5.20261019.1-beta",
 		"typescript": "^5.7.0",
-		"wrangler": "^4.114.0"
+		"wrangler": "4.151.3"
 	}
 }
