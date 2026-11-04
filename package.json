@@ -12,7 +12,8 @@
 		"test": "node --test src/*.test.ts",
 		"build": "wrangler deploy --dry-run --config wrangler.toml --outdir dist",
 		"check:runtime": "node scripts/check-runtime.mjs",
-		"check": "tsc --noEmit && biome check . --error-on-warnings && node --test src/*.test.ts && npm run build && npm run check:runtime"
+		"lint:observability": "node scripts/check-observability.mjs",
+		"check": "npm run lint:observability && tsc --noEmit && biome check . --error-on-warnings && node --test src/*.test.ts && npm run build && npm run check:runtime"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.14",

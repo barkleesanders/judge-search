@@ -13,7 +13,15 @@ enabled = true
 head_sampling_rate = 1
 
 [observability.logs]
+enabled = true
 invocation_logs = true
+persist = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
 
 [[r2_buckets]]
 binding = "DATA"
