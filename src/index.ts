@@ -6,6 +6,7 @@ import {
 	isCourtWatchNonJudgeRow,
 } from "./audit.ts";
 import { MUTATING_ROUTES } from "./auth-routes.ts";
+import { emitWideEvent } from "./wide-event.ts";
 
 // ── Types ──
 interface Env {
@@ -150,7 +151,7 @@ const CSS_TOKENS = `:root{
 }`;
 
 // ── Worker entry ──
-export default {
+const handler = {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		const p = url.pathname;
@@ -244,6 +245,31 @@ export default {
 			}
 		}
 	},
+};
+
+// Wide-event wrap (native observability rollout, 2026-11-04): every fetch
+// emits one JSON http_request event to Workers Logs via emitWideEvent;
+// a thrown handler still emits (status 500, outcome error) and rethrows
+// so Cloudflare Issues keeps firing. The scheduled (cron) handler is
+// intentionally not wrapped — it is not an HTTP request.
+export default {
+	async fetch(request: Request, env: Env): Promise<Response> {
+		const start = Date.now();
+		try {
+			const res = await handler.fetch(request, env);
+			emitWideEvent(request, res.status, start);
+			return res;
+		} catch (err) {
+			emitWideEvent(
+				request,
+				500,
+				start,
+				err instanceof Error ? err.name : "UnknownError",
+			);
+			throw err;
+		}
+	},
+	scheduled: handler.scheduled,
 };
 
 // ── API: Get city data from R2 ──
